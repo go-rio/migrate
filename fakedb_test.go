@@ -10,10 +10,7 @@ import (
 	"sync"
 )
 
-// fakeDB is an in-memory database/sql driver that records every statement and
-// serves programmed result rows, so runner behaviour — locking, transactions,
-// bookkeeping, failure handling — asserts on exact statement sequences
-// without a real database.
+// fakeDB records statements and serves programmed rows without a live database.
 type fakeDB struct {
 	mu       sync.Mutex
 	log      []string
@@ -28,7 +25,6 @@ type fakeDB struct {
 
 func newFakeDB() *fakeDB { return &fakeDB{} }
 
-// open returns a *sql.DB backed by this fake.
 func (f *fakeDB) open() *sql.DB { return sql.OpenDB(fakeConnector{f}) }
 
 func (f *fakeDB) logged() []string {
@@ -43,7 +39,6 @@ func (f *fakeDB) record(entry string) {
 	f.log = append(f.log, entry)
 }
 
-// loggedContaining returns log entries containing the substring.
 func (f *fakeDB) loggedContaining(sub string) []string {
 	var out []string
 	for _, l := range f.logged() {

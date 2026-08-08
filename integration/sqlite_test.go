@@ -31,10 +31,7 @@ func TestSQLiteDataMigration(t *testing.T) {
 }
 func TestSQLiteBaseline(t *testing.T) { runBaseline(t, openSQLite(t), migrate.SQLite) }
 
-// Audit LB11: SQLite's advisory lock is a no-op, so the single-writer model
-// plus record-first bookkeeping must arbitrate the race on the records table:
-// losers either wait and find nothing to do, or fail with rerun guidance
-// before touching the schema — never a raw driver error, never partial state.
+// SQLite races must resolve before either migrator changes the schema.
 func TestSQLiteConcurrentMigrators(t *testing.T) {
 	ctx := context.Background()
 	dsn := "file:" + filepath.Join(t.TempDir(), "app.db") + "?_pragma=busy_timeout(5000)"
@@ -90,7 +87,6 @@ func TestSQLiteConcurrentMigrators(t *testing.T) {
 		t.Error("at least one racer must win")
 	}
 
-	// The end state is coherent regardless of who won.
 	for _, table := range []string{"users", "posts", "tags"} {
 		if got := count(t, dbs[0], "SELECT COUNT(*) FROM "+table); got != 0 {
 			t.Errorf("%s should exist and be empty, got %d", table, got)
@@ -108,7 +104,6 @@ func TestSQLiteConcurrentMigrators(t *testing.T) {
 	}
 }
 
-// An Integer AutoIncrement column assigns ids on insert like ID does.
 func TestSQLiteAutoIncrement(t *testing.T) {
 	ctx := context.Background()
 	db := openSQLite(t)
@@ -134,9 +129,7 @@ func TestSQLiteAutoIncrement(t *testing.T) {
 	}
 }
 
-// A failed migration must leave nothing behind on a transactional-DDL engine:
-// no half-created tables, no record, no dirty flag to clear — and fixing the
-// migration simply makes the next Up succeed.
+// Transactional DDL must leave no partial state after failure.
 func TestSQLiteFailedMigrationLeavesNoTrace(t *testing.T) {
 	ctx := context.Background()
 	db := openSQLite(t)
@@ -176,8 +169,6 @@ func TestSQLiteFailedMigrationLeavesNoTrace(t *testing.T) {
 	}
 }
 
-// WithoutTransaction migrations run their statements directly on the
-// connection and are still recorded.
 func TestSQLiteWithoutTransaction(t *testing.T) {
 	ctx := context.Background()
 	db := openSQLite(t)
@@ -198,8 +189,7 @@ func TestSQLiteWithoutTransaction(t *testing.T) {
 	}
 }
 
-// Rolling back an alteration reverses each change, including indexes implied
-// by column modifiers, which SQLite requires to be dropped before the column.
+// SQLite must drop implied indexes before their columns during rollback.
 func TestSQLiteAlterRollback(t *testing.T) {
 	ctx := context.Background()
 	db := openSQLite(t)
@@ -226,7 +216,6 @@ func TestSQLiteAlterRollback(t *testing.T) {
 	}
 	mustExec(t, db, "INSERT INTO users (mail, nickname) VALUES ('a@x.dev', 'a')")
 
-	// Both migrations landed in one batch; step back just the alteration.
 	if err := m.Rollback(ctx, 1); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
@@ -240,9 +229,7 @@ func TestSQLiteAlterRollback(t *testing.T) {
 
 func TestSQLiteRepeatable(t *testing.T) { runRepeatable(t, openSQLite(t), migrate.SQLite) }
 
-// Recreate rebuilds a table with a new shape while keeping its rows: the only
-// way to change constraints on SQLite. Rows survive, new constraints enforce,
-// and conventional index names are rebuilt for the final table name.
+// Recreate must preserve rows while rebuilding SQLite constraints and indexes.
 func TestSQLiteRecreate(t *testing.T) {
 	ctx := context.Background()
 	db := openSQLite(t)
@@ -299,7 +286,6 @@ func TestSQLiteRecreate(t *testing.T) {
 		t.Error("no temporary object may survive the rebuild")
 	}
 
-	// The explicit down rebuilds the permissive shape.
 	if err := m.Rollback(ctx, 1); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
@@ -309,9 +295,7 @@ func TestSQLiteRecreate(t *testing.T) {
 	}
 }
 
-// Audit H5: DROP TABLE takes the table's triggers with it, and Recreate used
-// to report success while audit triggers silently vanished. The rebuild must
-// capture and recreate them, and they must keep firing.
+// Recreate must restore triggers removed with SQLite's old table.
 func TestSQLiteRecreateKeepsTriggers(t *testing.T) {
 	ctx := context.Background()
 	db := openSQLite(t)
@@ -360,8 +344,7 @@ func TestSQLiteRecreateKeepsTriggers(t *testing.T) {
 	}
 }
 
-// Fresh drops every table — the drop loop unwinds foreign key dependencies
-// (this connection enforces them) — then reruns all migrations from scratch.
+// Fresh must unwind foreign-key dependencies before reapplying migrations.
 func TestSQLiteFresh(t *testing.T) {
 	ctx := context.Background()
 	db := openSQLite(t)
@@ -391,9 +374,7 @@ func TestSQLiteFresh(t *testing.T) {
 	}
 }
 
-// Audit M16: Fresh only enumerated the current schema, so a records table
-// attached elsewhere survived with every migration recorded — Fresh reported
-// success over an empty database and the next Up had nothing to apply.
+// Fresh must handle a records table in an attached SQLite schema.
 func TestSQLiteFreshQualifiedRecordsTable(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -402,7 +383,7 @@ func TestSQLiteFreshQualifiedRecordsTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	// A single connection so the ATTACH survives for the whole test.
+	// ATTACH is connection-local.
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec("ATTACH DATABASE '" + filepath.Join(dir, "aux.db") + "' AS aux"); err != nil {
 		t.Fatalf("attach: %v", err)
@@ -431,7 +412,6 @@ func TestSQLiteFreshQualifiedRecordsTable(t *testing.T) {
 	if got := count(t, db, "SELECT COUNT(*) FROM aux.schema_migrations"); got != 1 {
 		t.Errorf("the records table should hold exactly the fresh run, got %d rows", got)
 	}
-	// The state is coherent: another Up finds nothing to do and users stays.
 	if err := m.Up(ctx); err != nil {
 		t.Fatalf("second Up: %v", err)
 	}
@@ -440,7 +420,6 @@ func TestSQLiteFreshQualifiedRecordsTable(t *testing.T) {
 	}
 }
 
-// Schema-qualified names work end to end against an attached database.
 func TestSQLiteQualifiedNames(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -450,7 +429,7 @@ func TestSQLiteQualifiedNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	// A single connection so the ATTACH survives for the whole test.
+	// ATTACH is connection-local.
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec("ATTACH DATABASE '" + filepath.Join(dir, "aux.db") + "' AS aux"); err != nil {
 		t.Fatalf("attach: %v", err)
@@ -482,8 +461,7 @@ func TestSQLiteQualifiedNames(t *testing.T) {
 	}
 }
 
-// Generated columns compute, checks enforce, and CopyFrom converts data
-// through a Recreate — the full v0.3 surface against a real database.
+// Recreate must preserve generated columns, checks, and converted data.
 func TestSQLiteGeneratedChecksAndCopyFrom(t *testing.T) {
 	ctx := context.Background()
 	db := openSQLite(t)
@@ -535,8 +513,6 @@ func TestSQLiteGeneratedChecksAndCopyFrom(t *testing.T) {
 	}
 }
 
-// Partial unique indexes exist for exactly this: a soft-deleted row releases
-// its name while two live rows still cannot share one.
 func TestSQLitePartialUniqueIndex(t *testing.T) {
 	ctx := context.Background()
 	db := openSQLite(t)

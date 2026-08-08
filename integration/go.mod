@@ -1,6 +1,6 @@
 module github.com/go-rio/migrate/integration
 
-go 1.25.0
+go 1.27rc2
 
 require (
 	github.com/go-rio/migrate v0.0.0

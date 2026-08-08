@@ -106,8 +106,7 @@ func TestCheckReversesAndSQLiteRefusesAlter(t *testing.T) {
 		t.Fatalf("sqlite should refuse and point at Recreate, got: %v", err)
 	}
 
-	// Anonymous checks are a declaration error (the Alembic lesson: unnamed
-	// constraints cannot be addressed later).
+	// Checks need names so later migrations can address them.
 	bad := migrationOf(t, func(s *Schema) {
 		s.Create("t", func(tb *Table) {
 			tb.ID()
@@ -135,7 +134,7 @@ func TestRecreateCopyFromAndGenerated(t *testing.T) {
 	"label" VARCHAR(255) NOT NULL GENERATED ALWAYS AS ('ev-' || id) STORED,
 	CONSTRAINT "events_age_positive" CHECK (age_years >= 0)
 )`,
-		// The generated column fills itself; age_years copies via the cast.
+		// Generated columns are omitted from the copy.
 		`INSERT INTO "events__migrate_new" ("id", "age_years") SELECT "id", CAST(age AS INTEGER) FROM "events"`,
 		`-- capture the triggers of "events"`,
 		`DROP TABLE "events"`,

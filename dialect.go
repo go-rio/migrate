@@ -5,55 +5,36 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// Dialect generates SQL for and drives one database engine. The built-in
-// dialects are Postgres, MySQL and SQLite; the interface is opaque so the
-// grammar can evolve without breaking third parties.
+// Dialect compiles and executes migrations for one database engine.
+// Built-in values are Postgres, MySQL, and SQLite.
 type Dialect interface {
 	name() string
-
-	// compile turns one recorded operation into executable statements.
 	compile(op operation) ([]statement, error)
-
-	// ensureTableSQL creates the migration records table if missing.
 	ensureTableSQL(table string) string
-	// quoteIdent escapes an identifier for the dialect.
 	quoteIdent(name string) string
-	// placeholder renders the n-th (1-based) query placeholder.
 	placeholder(n int) string
-	// transactionalDDL reports whether DDL statements roll back with the
-	// surrounding transaction.
 	transactionalDDL() bool
-
-	// lock takes a database-wide advisory lock named for the records table,
-	// blocking up to timeout, and unlock releases it. Both run on the same
-	// dedicated connection.
 	lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) error
 	unlock(ctx context.Context, conn *sql.Conn, table string) error
-
-	// listTablesSQL queries the names of every base table in the current
-	// schema, one string column.
 	listTablesSQL() string
-	// freshDropSQL drops one table during Fresh, cascading where the engine
-	// supports it.
 	freshDropSQL(table string) string
 }
 
-// statement is one executable unit of a compiled migration: either SQL text
-// or an opaque Go function.
+// statement is either SQL or an opaque Go migration function.
 type statement struct {
 	sql  string
 	args []any
 	fn   func(context.Context, DB) error
-	// desc labels an fn statement for plans and failure messages, which
-	// cannot render the function itself.
+	// desc labels an opaque function in plans and errors.
 	desc string
-	// ddl marks statements that end a transaction implicitly on engines
-	// without transactional DDL (MySQL): schema operations, and raw SQL not
-	// recognizably plain DML.
+	// ddl marks MySQL's implicitly committing statements.
 	ddl bool
 }
 
@@ -61,7 +42,6 @@ func sqlStatement(format string, a ...any) statement {
 	return statement{sql: fmt.Sprintf(format, a...)}
 }
 
-// quoter escapes identifiers with the dialect's quote character.
 type quoter byte
 
 func (q quoter) ident(name string) string {
@@ -77,9 +57,7 @@ func (q quoter) idents(names []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// table quotes a possibly schema-qualified table name: dots separate path
-// segments, each quoted on its own ("analytics.events" → "analytics"."events").
-// Table names therefore cannot contain literal dots.
+// table quotes each segment of a schema-qualified name.
 func (q quoter) table(name string) string {
 	segs := strings.Split(name, ".")
 	for i, s := range segs {
@@ -88,9 +66,7 @@ func (q quoter) table(name string) string {
 	return strings.Join(segs, ".")
 }
 
-// baseName strips the schema qualification from a table name. Conventional
-// constraint and index names build on it: constraints live inside the table's
-// schema already, and Postgres refuses qualified names in those positions.
+// baseName strips schema qualification for conventional object names.
 func baseName(table string) string {
 	if i := strings.LastIndexByte(table, '.'); i >= 0 {
 		return table[i+1:]
@@ -98,8 +74,6 @@ func baseName(table string) string {
 	return table
 }
 
-// schemaPrefix returns the qualification up to and including the final dot,
-// or "" for a bare name. Postgres and SQLite drop indexes by qualified name.
 func schemaPrefix(table string) string {
 	if i := strings.LastIndexByte(table, '.'); i >= 0 {
 		return table[:i+1]
@@ -107,37 +81,40 @@ func schemaPrefix(table string) string {
 	return ""
 }
 
-// literal renders a Go value as a SQL literal for DDL default clauses, which
-// cannot use bind parameters. backslashEscapes marks dialects (MySQL) whose
-// strings treat backslash as an escape character.
+// literal renders DDL defaults, where bind parameters are unavailable.
 func literal(v any, backslashEscapes bool) (string, error) {
-	switch x := v.(type) {
-	case nil:
+	if v == nil {
 		return "NULL", nil
-	case string:
-		s := strings.ReplaceAll(x, "'", "''")
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.String:
+		s := strings.ReplaceAll(rv.String(), "'", "''")
 		if backslashEscapes {
 			s = strings.ReplaceAll(s, `\`, `\\`)
 		}
 		return "'" + s + "'", nil
-	case bool:
-		if x {
+	case reflect.Bool:
+		if rv.Bool() {
 			return "TRUE", nil
 		}
 		return "FALSE", nil
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
-		return fmt.Sprintf("%d", x), nil
-	case float32, float64:
-		return fmt.Sprintf("%v", x), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(rv.Int(), 10), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return strconv.FormatUint(rv.Uint(), 10), nil
+	case reflect.Float32, reflect.Float64:
+		value := rv.Float()
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return "", fmt.Errorf("migrate: unsupported non-finite default value %v; use DefaultExpr for a database-specific expression", value)
+		}
+		return strconv.FormatFloat(value, 'g', -1, rv.Type().Bits()), nil
 	default:
 		return "", fmt.Errorf("migrate: unsupported default value of type %T; use DefaultExpr for SQL expressions", v)
 	}
 }
 
-// enumCheckSQL renders the inline column CHECK constraint that emulates an
-// enum on dialects without a native type. Attaching it to the column keeps
-// CREATE TABLE and ADD COLUMN on the same path (SQLite cannot add table
-// constraints after the fact).
+// enumCheckSQL emulates enums where no native type exists.
 func enumCheckSQL(q quoter, table string, c *columnDef) string {
 	vals := make([]string, len(c.enumVals))
 	for i, v := range c.enumVals {
@@ -147,8 +124,6 @@ func enumCheckSQL(q quoter, table string, c *columnDef) string {
 		q.ident(baseName(table)+"_"+c.name+"_check"), q.ident(c.name), strings.Join(vals, ", "))
 }
 
-// generatedClause renders GENERATED ALWAYS AS (...) STORED|VIRTUAL, shared
-// verbatim by all three dialects.
 func generatedClause(c *columnDef) string {
 	if c.generatedExpr == "" {
 		return ""
@@ -160,14 +135,10 @@ func generatedClause(c *columnDef) string {
 	return " GENERATED ALWAYS AS (" + c.generatedExpr + ")" + kind
 }
 
-// checkClause renders a named table-level CHECK constraint.
 func checkClause(q quoter, chk *checkDef) string {
 	return fmt.Sprintf("CONSTRAINT %s CHECK (%s)", q.ident(chk.name), chk.expr)
 }
 
-// defaultValueSQL renders a column's declared default as a bare SQL value, or
-// "" when none is declared. currentTS is the dialect's current-timestamp
-// expression, which MySQL requires to carry the column's fractional precision.
 func defaultValueSQL(c *columnDef, backslashEscapes bool, currentTS string) (string, error) {
 	switch {
 	case c.useCurrent:
@@ -184,7 +155,6 @@ func defaultValueSQL(c *columnDef, backslashEscapes bool, currentTS string) (str
 	return "", nil
 }
 
-// defaultClause renders the DEFAULT part of a column definition.
 func defaultClause(c *columnDef, backslashEscapes bool, currentTS string) (string, error) {
 	value, err := defaultValueSQL(c, backslashEscapes, currentTS)
 	if err != nil || value == "" {
@@ -193,8 +163,6 @@ func defaultClause(c *columnDef, backslashEscapes bool, currentTS string) (strin
 	return " DEFAULT " + value, nil
 }
 
-// foreignClause renders an inline FOREIGN KEY table constraint, shared by all
-// dialects.
 func foreignClause(q quoter, table string, fk *foreignDef) string {
 	refCols := fk.refColumns
 	if len(refCols) == 0 {
@@ -212,9 +180,7 @@ func foreignClause(q quoter, table string, fk *foreignDef) string {
 	return b.String()
 }
 
-// validateIndex is the per-dialect support matrix for index features; every
-// unsupported combination fails compilation with advice instead of silently
-// producing a weaker index.
+// validateIndex rejects features a dialect cannot preserve faithfully.
 func validateIndex(dialect, table string, idx *indexDef) error {
 	name := idx.resolvedName(table)
 	switch dialect {
@@ -264,9 +230,7 @@ func validateIndex(dialect, table string, idx *indexDef) error {
 	return nil
 }
 
-// indexItems renders the indexed elements: quoted column names, or verbatim
-// expressions each in parentheses — the form MySQL requires for functional
-// indexes and the others accept.
+// indexItems parenthesizes expressions for MySQL functional indexes.
 func indexItems(q quoter, idx *indexDef) string {
 	if len(idx.exprs) == 0 {
 		return q.idents(idx.columns)
@@ -278,15 +242,8 @@ func indexItems(q quoter, idx *indexDef) string {
 	return strings.Join(items, ", ")
 }
 
-// createIndexSQL renders a standalone CREATE INDEX, shared by all dialects.
-// Single-column indexes declared with Column.Unique/Index compile through
-// here too, so every index carries the conventional, reconstructible name.
-//
-// Engines disagree on where a schema qualification goes: SQLite attaches it
-// to the index name (the table must be bare), Postgres and MySQL to the table
-// (the index name must be bare). They also disagree on where the index method
-// goes: before the key list on Postgres (USING gin), after it on MySQL
-// (USING HASH).
+// createIndexSQL handles dialect-specific schema qualification and index
+// method placement.
 func createIndexSQL(dialect string, q quoter, table string, idx *indexDef, schemaOnIndex bool) (string, error) {
 	if err := validateIndex(dialect, table, idx); err != nil {
 		return "", err
@@ -303,8 +260,7 @@ func createIndexSQL(dialect string, q quoter, table string, idx *indexDef, schem
 	}
 	concurrently := ""
 	if idx.concurrently && dialect == "postgres" {
-		// MySQL and SQLite build indexes without long write locks anyway;
-		// only Postgres needs the explicit online mode.
+		// Only PostgreSQL needs an explicit online mode.
 		concurrently = "CONCURRENTLY "
 	}
 
@@ -334,8 +290,6 @@ func createIndexSQL(dialect string, q quoter, table string, idx *indexDef, schem
 	return b.String(), nil
 }
 
-// charLength defends against zero and negative declared lengths; the fluent
-// declarations already default to 255.
 func charLength(n int) int {
 	if n <= 0 {
 		return 255
@@ -343,8 +297,6 @@ func charLength(n int) int {
 	return n
 }
 
-// inlineIndexes collects the index definitions implied by column modifiers so
-// they compile as standalone statements alongside explicitly declared ones.
 func inlineIndexes(cols []*columnDef) []*indexDef {
 	var idxs []*indexDef
 	for _, c := range cols {
@@ -358,9 +310,7 @@ func inlineIndexes(cols []*columnDef) []*indexDef {
 	return idxs
 }
 
-// primaryColumns resolves the table-level primary key columns, validating
-// that an auto-incrementing column (whose PRIMARY KEY is rendered inline) is
-// not combined with other primary key declarations.
+// primaryColumns prevents combining inline auto-increment and table keys.
 func primaryColumns(def *tableDef) ([]string, error) {
 	var inline bool
 	var cols []string
@@ -390,21 +340,9 @@ func declarationErrors(errs []error) error {
 	return fmt.Errorf("migrate: invalid declaration: %w", errors.Join(errs...))
 }
 
-// compileRecreate builds the move-and-copy sequence shared by every dialect:
-// create a temporary table with the target shape, copy the surviving rows,
-// capture the table's triggers, drop the old table, rename into place,
-// rebuild indexes, recreate the triggers. Constraints on the temporary table
-// are pinned to their conventional final names via constraintBase, so nothing
-// keeps a temporary name after the rename. Child foreign keys referencing the
-// table resolve by name again once the rename lands — the same order Alembic
-// uses for SQLite batch mode.
-//
-// DROP TABLE takes the table's triggers with it. They exist only in the live
-// database (created through Exec — the builder does not declare them), so
-// listTriggers reads their DDL at migration time just before the drop, and a
-// second opaque statement replays it verbatim once the rename restores the
-// original table name — the recreate-your-triggers step of SQLite's official
-// twelve-step ALTER TABLE procedure.
+// compileRecreate creates a temporary table, copies rows, swaps names, and
+// rebuilds indexes. It captures and restores live triggers because DROP TABLE
+// removes objects not represented by the builder.
 func compileRecreate(d Dialect, q quoter, schemaOnIndex bool, renameSQL func(from, to string) statement,
 	listTriggers func(context.Context, DB, string) ([]string, error), def *tableDef) ([]statement, error) {
 	tmp := def.name + "__migrate_new"
@@ -479,8 +417,6 @@ func compileRecreate(d Dialect, q quoter, schemaOnIndex bool, renameSQL func(fro
 	return stmts, nil
 }
 
-// queryStrings collects a single string column into a slice, for the runtime
-// catalog reads inside opaque statements.
 func queryStrings(ctx context.Context, db DB, query string, args ...any) ([]string, error) {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {

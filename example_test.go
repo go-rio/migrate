@@ -11,15 +11,21 @@ import (
 	"github.com/go-rio/migrate"
 )
 
-// Each migration lives in a Go file of the application (conventionally a
-// migrations package imported for effect) and registers itself at init time.
+type role string
+
+const (
+	roleAdmin  role = "admin"
+	roleMember role = "member"
+)
+
+// Applications can register migrations from init functions.
 func init() {
 	migrate.Add("20260708100000_create_users", func(s *migrate.Schema) {
 		s.Create("users", func(t *migrate.Table) {
 			t.ID()
 			t.String("email").Unique()
 			t.String("name", 100)
-			t.Enum("role", "admin", "member").Default("member")
+			t.Enum("role", roleAdmin, roleMember).Default(roleMember)
 			t.Timestamps()
 		})
 	})
@@ -36,8 +42,7 @@ func init() {
 	})
 }
 
-// The application applies pending migrations at startup. Everything is
-// compiled in: deploying the binary deploys the migrations.
+// Applications can apply compiled-in migrations at startup.
 func Example() {
 	db, err := sql.Open("pgx", "postgres://localhost/app") // driver of your choice
 	if err != nil {
@@ -57,8 +62,7 @@ func Example() {
 	}
 }
 
-// A data migration mixes schema changes with Go logic; raw SQL and Go
-// functions are irreversible, so a rollback needs an explicit down.
+// Data migrations with Go logic require an explicit rollback.
 func Example_dataMigration() {
 	migrate.Add("20260709120000_backfill_names",
 		func(s *migrate.Schema) {
@@ -78,9 +82,7 @@ func Example_dataMigration() {
 	)
 }
 
-// Collection.SQL renders migrations offline — no database — for review or for
-// handing a script to a DBA. Migrator.Plan does the same against a live
-// database, limited to what is actually pending.
+// Collection.SQL renders migrations without a database.
 func ExampleCollection_SQL() {
 	c := migrate.NewCollection()
 	c.Add("20260708100000_create_teams", func(s *migrate.Schema) {

@@ -14,7 +14,6 @@ func migrationOf(t *testing.T, up func(*Schema), opts ...MigrationOption) *Migra
 	return c.get("m")
 }
 
-// downSQL compiles the migration's rollback for the dialect.
 func downSQL(t *testing.T, d Dialect, m *Migration) []string {
 	t.Helper()
 	stmts, err := m.compile(d, false)
@@ -56,7 +55,6 @@ func TestAutomaticDownForAlter(t *testing.T) {
 		})
 	})
 	got := downSQL(t, Postgres, m)
-	// Changes reverse in reverse order; the added column drops last.
 	want := []string{
 		`ALTER TABLE "users" DROP CONSTRAINT "users_org_id_foreign"`,
 		`DROP INDEX "users_email_unique"`,
@@ -98,7 +96,7 @@ func TestExplicitDownWins(t *testing.T) {
 func TestDeclarationErrorsSurfaceOnCompile(t *testing.T) {
 	cases := map[string]func(*Schema){
 		"empty column name":      func(s *Schema) { s.Create("t", func(t *Table) { t.String("") }) },
-		"enum without values":    func(s *Schema) { s.Create("t", func(t *Table) { t.Enum("status") }) },
+		"enum without values":    func(s *Schema) { s.Create("t", func(t *Table) { t.Enum[string]("status") }) },
 		"empty raw type":         func(s *Schema) { s.Create("t", func(t *Table) { t.Column("c", "") }) },
 		"index without columns":  func(s *Schema) { s.Create("t", func(t *Table) { t.Index() }) },
 		"alter-only in create":   func(s *Schema) { s.Create("t", func(t *Table) { t.DropColumn("x") }) },
@@ -216,8 +214,6 @@ func TestGuessParentTable(t *testing.T) {
 	}
 }
 
-// Audit: Primary combined with Nullable silently produced a NULL-accepting
-// primary key on SQLite.
 func TestPrimaryNullableIsRejected(t *testing.T) {
 	cases := map[string]func(*Schema){
 		"column primary": func(s *Schema) {

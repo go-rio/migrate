@@ -10,29 +10,22 @@ import (
 	"time"
 )
 
-// appliedAtFormat stores applied-at instants as sortable UTC strings, which
-// every dialect round-trips identically with no driver time configuration.
+// Text avoids driver-specific time decoding in the records table.
 const appliedAtFormat = "2006-01-02T15:04:05.000000Z"
 
-// repeatableBatch marks records of repeatable migrations, which belong to no
-// batch: rollbacks skip them entirely.
+// Repeatables belong to no rollback batch.
 const repeatableBatch = -1
 
-// Migrator applies and rolls back the migrations of one collection against
-// one database. Methods are safe to call from concurrent processes: runs are
-// serialized by a database advisory lock (see WithoutLock to opt out).
+// Migrator applies one Collection to a database. Advisory locks serialize
+// concurrent processes unless WithoutLock is set.
 type Migrator struct {
 	db  *sql.DB
 	d   Dialect
 	cfg config
 }
 
-// New creates a Migrator for db, which stays owned by the caller. The dialect
-// must match the driver the caller opened db with — this package imports no
-// drivers:
-//
-//	db, _ := sql.Open("pgx", dsn)
-//	m, err := migrate.New(db, migrate.Postgres)
+// New creates a Migrator without taking ownership of db. The dialect must
+// match the database driver.
 func New(db *sql.DB, dialect Dialect, opts ...Option) (*Migrator, error) {
 	if db == nil {
 		return nil, errors.New("migrate: db must not be nil")
@@ -50,7 +43,6 @@ func New(db *sql.DB, dialect Dialect, opts ...Option) (*Migrator, error) {
 	return &Migrator{db: db, d: dialect, cfg: cfg}, nil
 }
 
-// record is one row of the records table.
 type record struct {
 	version   string
 	batch     int
@@ -58,10 +50,8 @@ type record struct {
 	appliedAt string
 }
 
-// Up applies every registered migration that has not been applied yet, in
-// name order, as one batch. Each migration runs in its own transaction unless
-// it opted out; a failure stops the run, leaves no partial bookkeeping and
-// returns an error identifying the failing statement.
+// Up applies pending versioned migrations as one batch, then runs changed
+// repeatables. Each migration uses its own transaction unless opted out.
 func (m *Migrator) Up(ctx context.Context) error {
 	return m.locked(ctx, func(conn *sql.Conn) error {
 		recs, err := m.loadState(ctx, conn)
@@ -90,7 +80,7 @@ func (m *Migrator) Up(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		// The safety analysis sees the whole run before anything executes.
+		// Strict safety must reject the whole run before execution starts.
 		if err := m.checkSafety(append(append([]*Migration(nil), pending...), due...)); err != nil {
 			return err
 		}
@@ -126,10 +116,7 @@ func (m *Migrator) Up(ctx context.Context) error {
 	})
 }
 
-// dueRepeatables resolves which repeatable migrations would run: new ones and
-// those whose declaration no longer compiles to the recorded SQL, in name
-// order. dueExists reports, per migration, whether a record already exists
-// (re-run) or not (first run).
+// dueRepeatables returns new and checksum-changed repeatables.
 func (m *Migrator) dueRepeatables(recs []record) (due []*Migration, dueExists []bool, err error) {
 	recorded := make(map[string]string)
 	for _, r := range recs {
@@ -158,12 +145,8 @@ type rollbackSpec struct {
 	reset bool // everything, baselined rows included
 }
 
-// Rollback undoes the steps most recently applied migrations in reverse
-// application order — Rollback(ctx, 1) undoes just the newest one. steps must
-// be positive. Migrations declared with WithDown run their explicit down; the
-// rest reverse their recorded operations automatically. A migration whose
-// operations discard information (Drop, DropColumn, Exec, Run) fails with
-// ErrIrreversible instead of guessing. Baselined rows are never touched.
+// Rollback reverses the latest steps versioned migrations. Irreversible
+// operations fail with ErrIrreversible, and baselined rows are not touched.
 func (m *Migrator) Rollback(ctx context.Context, steps int) error {
 	if steps < 1 {
 		return fmt.Errorf("migrate: Rollback requires a positive step count, got %d", steps)
@@ -171,16 +154,12 @@ func (m *Migrator) Rollback(ctx context.Context, steps int) error {
 	return m.rollback(ctx, rollbackSpec{steps: steps})
 }
 
-// RollbackBatch undoes the most recent batch: everything the last Up applied
-// together, which after a first deploy is every migration. Baselined rows are
-// never touched.
+// RollbackBatch reverses the latest batch without touching baselined rows.
 func (m *Migrator) RollbackBatch(ctx context.Context) error {
 	return m.rollback(ctx, rollbackSpec{batch: true})
 }
 
-// Reset rolls back everything that was ever applied — baselined rows included
-// — leaving an empty database. Every applied migration must be reversible or
-// declare a down.
+// Reset reverses all versioned migrations, including baselined rows.
 func (m *Migrator) Reset(ctx context.Context) error {
 	return m.rollback(ctx, rollbackSpec{reset: true})
 }
@@ -201,8 +180,7 @@ func (m *Migrator) rollback(ctx context.Context, spec rollbackSpec) error {
 			}
 		}
 		if spec.reset {
-			// Reset forgets repeatable records — there is no down to run, but
-			// the next Up starts from a clean slate and runs them all again.
+			// Repeatables have no down; forgetting them makes the next Up rerun all.
 			query := fmt.Sprintf("DELETE FROM %s WHERE batch = %s",
 				m.d.quoteIdent(m.cfg.table), m.d.placeholder(1))
 			if _, err := conn.ExecContext(ctx, query, repeatableBatch); err != nil {
@@ -213,27 +191,20 @@ func (m *Migrator) rollback(ctx context.Context, spec rollbackSpec) error {
 	})
 }
 
-// rollbackTargets resolves which applied migrations the spec selects, newest
-// first, failing when one of them is not registered in the collection.
 func (m *Migrator) rollbackTargets(ctx context.Context, conn *sql.Conn, spec rollbackSpec) ([]*Migration, error) {
 	recs, err := m.loadState(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
-	// Repeatable migrations have no down and belong to no batch.
 	recs = slices.DeleteFunc(recs, func(r record) bool { return r.batch == repeatableBatch })
 	if !spec.reset {
-		// Baselined rows (batch 0) were never executed by this tool; only an
-		// explicit Reset rolls them back. Without this, once every real batch
-		// is undone the baseline would become the "latest batch" and a plain
-		// Rollback would drop pre-existing production tables.
+		// Only Reset may reverse schema this tool merely baselined.
 		recs = slices.DeleteFunc(recs, func(r record) bool { return r.batch == 0 })
 	}
 	if len(recs) == 0 {
 		return nil, nil
 	}
-	// Reverse application order: later batches first, later names first
-	// within a batch.
+	// Reverse application order within and across batches.
 	slices.SortFunc(recs, func(a, b record) int {
 		if a.batch != b.batch {
 			return b.batch - a.batch
@@ -264,8 +235,6 @@ func (m *Migrator) rollbackTargets(ctx context.Context, conn *sql.Conn, spec rol
 	return targets, nil
 }
 
-// runOne executes one migration in the requested direction plus the given
-// bookkeeping mutation, atomically when transactions are in play.
 func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, up bool, bookkeep statement) error {
 	verb, verbed := "apply", "applied"
 	if !up {
@@ -277,12 +246,8 @@ func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, u
 	}
 	arbiter := -1
 	if up && mig.useTx && m.d.name() == "sqlite" {
-		// SQLite has no advisory lock; its single-writer model serializes the
-		// migration transactions themselves. Recording first makes the
-		// bookkeeping row the transaction's first write: a racing migrator
-		// waits there for the write lock, then loses on the records table's
-		// primary key before any schema statement runs — instead of blowing
-		// up with "already exists" halfway through.
+		// SQLite has no advisory lock. Writing the record first makes a racing
+		// migrator lose before it can change the schema.
 		stmts = append([]statement{bookkeep}, stmts...)
 		arbiter = 0
 	} else {
@@ -303,9 +268,7 @@ func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, u
 	return nil
 }
 
-// runInTx executes the statements in one transaction. arbiter, when not -1,
-// is the index of a record-first bookkeeping statement whose duplicate-key
-// failure means another migrator applied this migration concurrently.
+// arbiter identifies SQLite's record-first concurrency check.
 func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statement, arbiter int) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -329,13 +292,8 @@ func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statemen
 	return nil
 }
 
-// implicitCommitNote reports what a failed migration left behind on an engine
-// whose DDL ends transactions implicitly (MySQL). A DDL statement commits
-// everything before it — even when the DDL itself then fails — and statements
-// after one run in autocommit mode, committing one by one, so the ROLLBACK
-// above undid none of the executed prefix. Only a failure before the first
-// DDL leaves the database untouched. failed is the 0-based index of the
-// failing statement.
+// implicitCommitNote describes the prefix persisted by MySQL's implicit DDL
+// commits. failed is the zero-based failing statement.
 func implicitCommitNote(dialect string, stmts []statement, failed int) string {
 	dirty := false
 	for _, s := range stmts[:min(failed+1, len(stmts))] {
@@ -355,8 +313,6 @@ func implicitCommitNote(dialect string, stmts []statement, failed int) string {
 		dialect, span, verb)
 }
 
-// runStatements executes the statements in order, returning the 0-based index
-// of the statement that failed alongside its error.
 func runStatements(ctx context.Context, db DB, stmts []statement) (int, error) {
 	for i, s := range stmts {
 		var err error
@@ -385,8 +341,6 @@ func describeStatement(s statement) string {
 	}
 	return sql
 }
-
-// The bookkeeping mutations that run atomically with their migration.
 
 func (m *Migrator) insertRecord(mig *Migration, batch int) (statement, error) {
 	sum, err := mig.checksum(m.d)
@@ -423,8 +377,6 @@ func (m *Migrator) now() string {
 	return m.cfg.clock.Now().UTC().Format(appliedAtFormat)
 }
 
-// loadState ensures the records table exists and returns its rows in name
-// order.
 func (m *Migrator) loadState(ctx context.Context, db DB) ([]record, error) {
 	if _, err := db.ExecContext(ctx, m.d.ensureTableSQL(m.cfg.table)); err != nil {
 		return nil, fmt.Errorf("migrate: create records table: %w", err)
@@ -449,12 +401,8 @@ func (m *Migrator) loadState(ctx context.Context, db DB) ([]record, error) {
 	return recs, nil
 }
 
-// verifyChecksums compares each applied migration against what its current
-// declaration compiles to. A mismatch means the migration changed after it
-// ran — a warning by default, an error under WithStrictChecksum. Records
-// without a checksum (from Baseline of older tooling) are skipped, as are
-// repeatable records: for those a changed checksum just means a pending
-// re-run.
+// verifyChecksums warns on changed versioned migrations or fails in strict
+// mode. Repeatables and legacy records without checksums are skipped.
 func (m *Migrator) verifyChecksums(recs []record) error {
 	for _, r := range recs {
 		if r.batch == repeatableBatch || strings.TrimSpace(r.checksum) == "" {
@@ -479,9 +427,7 @@ func (m *Migrator) verifyChecksums(recs []record) error {
 	return nil
 }
 
-// locked runs fn on a dedicated connection while holding the advisory lock.
-// Session-level locks die with the connection, so a crashed migrator never
-// wedges the next one.
+// locked holds the session advisory lock on one dedicated connection.
 func (m *Migrator) locked(ctx context.Context, fn func(*sql.Conn) error) error {
 	conn, err := m.db.Conn(ctx)
 	if err != nil {
@@ -493,8 +439,7 @@ func (m *Migrator) locked(ctx context.Context, fn func(*sql.Conn) error) error {
 			return err
 		}
 		defer func() {
-			// Run even after ctx cancellation, but never hang forever: the
-			// session lock dies with the connection anyway.
+			// Unlock after cancellation, but rely on connection close after 10s.
 			unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			if err := m.d.unlock(unlockCtx, conn, m.cfg.table); err != nil {

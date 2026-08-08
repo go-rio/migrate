@@ -2,13 +2,11 @@ package migrate
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"testing"
 )
 
-// compileSchema runs fn against a fresh Schema and compiles the recorded
-// operations for d, returning the SQL texts. Opaque fn statements render as
-// "-- " plus their description, so golden lists document them in place.
 func compileSchema(t *testing.T, d Dialect, fn func(*Schema)) []string {
 	t.Helper()
 	s := &Schema{}
@@ -45,8 +43,6 @@ func assertSQL(t *testing.T, got []string, want []string) {
 	}
 }
 
-// The showcase table exercises most column kinds, modifiers, conventional
-// index names and the constrained foreign key in one declaration.
 func showcase(s *Schema) {
 	s.Create("users", func(t *Table) {
 		t.ID()
@@ -242,17 +238,43 @@ func TestDefaultRendering(t *testing.T) {
 			t.String("quoted").Default("it's")
 			t.UUID("token").DefaultExpr("gen_random_uuid()")
 			t.TimestampTz("seen_at").UseCurrent()
-			t.Integer("nil_default").Nullable().Default(nil)
 		})
 	})
 	want := []string{
 		`CREATE TABLE "t" (
 	"quoted" VARCHAR(255) NOT NULL DEFAULT 'it''s',
 	"token" UUID NOT NULL DEFAULT (gen_random_uuid()),
-	"seen_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	"nil_default" INTEGER DEFAULT NULL
+	"seen_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`,
 	}
+	assertSQL(t, got, want)
+}
+
+func TestDefinedDefaultAndEnumTypes(t *testing.T) {
+	type role string
+	type retries int16
+	type enabled bool
+	type quota uint32
+	type ratio float32
+
+	roles := []role{"admin", "member"}
+	got := compileSchema(t, Postgres, func(s *Schema) {
+		s.Create("users", func(t *Table) {
+			t.Enum("role", roles...).Default(role("member"))
+			t.SmallInteger("retries").Default(retries(3))
+			t.Boolean("enabled").Default(enabled(true))
+			t.BigInteger("quota").Default(quota(25))
+			t.Float("ratio").Default(ratio(1.5))
+		})
+		roles[0] = "owner"
+	})
+	want := []string{`CREATE TABLE "users" (
+	"role" VARCHAR(255) NOT NULL DEFAULT 'member' CONSTRAINT "users_role_check" CHECK ("role" IN ('admin', 'member')),
+	"retries" SMALLINT NOT NULL DEFAULT 3,
+	"enabled" BOOLEAN NOT NULL DEFAULT TRUE,
+	"quota" BIGINT NOT NULL DEFAULT 25,
+	"ratio" REAL NOT NULL DEFAULT 1.5
+)`}
 	assertSQL(t, got, want)
 }
 
@@ -267,7 +289,7 @@ func TestMySQLBackslashEscaping(t *testing.T) {
 	}
 	assertSQL(t, got, want)
 
-	// Postgres keeps backslashes verbatim (standard_conforming_strings).
+	// PostgreSQL uses standard_conforming_strings.
 	got = compileSchema(t, Postgres, func(s *Schema) {
 		s.Create("t", func(t *Table) {
 			t.String("path").Default(`C:\logs`)
@@ -291,12 +313,26 @@ func TestMySQLTimestampCurrentPrecision(t *testing.T) {
 }
 
 func TestUnsupportedDefaultValueType(t *testing.T) {
-	s := &Schema{}
-	s.Create("t", func(t *Table) {
-		t.String("bad").Default(struct{}{})
-	})
-	if _, err := Postgres.compile(s.ops[0]); err == nil || !strings.Contains(err.Error(), "DefaultExpr") {
+	if _, err := literal(struct{}{}, false); err == nil || !strings.Contains(err.Error(), "DefaultExpr") {
 		t.Fatalf("expected an error pointing to DefaultExpr, got: %v", err)
+	}
+}
+
+func TestNonFiniteDefaultValue(t *testing.T) {
+	for name, value := range map[string]float64{
+		"positive infinity": math.Inf(1),
+		"negative infinity": math.Inf(-1),
+		"not a number":      math.NaN(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &Schema{}
+			s.Create("t", func(t *Table) {
+				t.Double("bad").Default(value)
+			})
+			if _, err := Postgres.compile(s.ops[0]); err == nil || !strings.Contains(err.Error(), "non-finite") {
+				t.Fatalf("expected a non-finite error, got: %v", err)
+			}
+		})
 	}
 }
 
@@ -325,7 +361,7 @@ func TestTableCommentAndRenameIndex(t *testing.T) {
 		"ALTER TABLE `events` COMMENT = 'updated'",
 	})
 
-	// SQLite ignores comments and refuses index renames explicitly.
+	// SQLite ignores comments and cannot rename indexes.
 	s := &Schema{}
 	s.Create("events", func(t *Table) {
 		t.ID()
@@ -341,8 +377,7 @@ func TestTableCommentAndRenameIndex(t *testing.T) {
 		t.Fatalf("sqlite rename index should error clearly, got: %v", err)
 	}
 
-	// Renaming an index reverses to the opposite rename; changing a comment
-	// in an alteration is irreversible.
+	// Comment changes are irreversible.
 	m := migrationOf(t, func(s *Schema) {
 		s.Table("events", func(t *Table) { t.RenameIndex("a", "b") })
 	})
@@ -378,7 +413,6 @@ func TestAutoIncrementColumns(t *testing.T) {
 )`,
 	})
 
-	// SmallInteger keeps its width on engines that distinguish it.
 	small := compileSchema(t, Postgres, func(s *Schema) {
 		s.Create("c", func(t *Table) { t.SmallInteger("id").AutoIncrement() })
 	})
@@ -444,8 +478,7 @@ func TestIdentifierQuoting(t *testing.T) {
 	}
 }
 
-// Audit: SQLite ADD COLUMN restrictions that only bite on populated tables
-// must fail at compile time.
+// Invalid SQLite ADD COLUMN forms must fail during compilation.
 func TestSQLiteAlterAddColumnGuards(t *testing.T) {
 	cases := map[string]struct {
 		declare func(*Table)
@@ -474,7 +507,6 @@ func TestSQLiteAlterAddColumnGuards(t *testing.T) {
 			}
 		})
 	}
-	// Virtual generated columns remain addable.
 	s := &Schema{}
 	s.Table("events", func(t *Table) {
 		t.String("kind", 32).VirtualAs("json_extract(meta,'$.kind')").Nullable()
@@ -484,7 +516,6 @@ func TestSQLiteAlterAddColumnGuards(t *testing.T) {
 	}
 }
 
-// Audit: raw-typed auto-increment must be INTEGER on SQLite.
 func TestSQLiteRawAutoIncrementRequiresInteger(t *testing.T) {
 	s := &Schema{}
 	s.Create("t", func(tb *Table) { tb.Column("id", "BIGINT").AutoIncrement() })

@@ -12,8 +12,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// openPostgres connects to MIGRATE_POSTGRES_DSN or skips, e.g.
-// postgres://postgres:postgres@localhost:5432/migrate_test?sslmode=disable
+// openPostgres skips unless MIGRATE_POSTGRES_DSN is set.
 func openPostgres(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("MIGRATE_POSTGRES_DSN")
@@ -38,9 +37,7 @@ func TestPostgresDataMigration(t *testing.T) {
 }
 func TestPostgresBaseline(t *testing.T) { runBaseline(t, openPostgres(t), migrate.Postgres) }
 
-// Replicas racing at deploy time: two migrators with separate connection
-// pools run Up concurrently. The advisory lock serializes them; both succeed
-// and every migration applies exactly once.
+// The advisory lock must serialize concurrent migrators.
 func TestPostgresConcurrentMigrators(t *testing.T) {
 	db1 := openPostgres(t)
 	db2 := openPostgres(t)
@@ -74,8 +71,7 @@ func TestPostgresConcurrentMigrators(t *testing.T) {
 	}
 }
 
-// A failed migration rolls back atomically on Postgres: transactional DDL is
-// the whole point of preferring it for migrations.
+// PostgreSQL transactional DDL must leave no partial state after failure.
 func TestPostgresFailedMigrationLeavesNoTrace(t *testing.T) {
 	ctx := context.Background()
 	db := openPostgres(t)
@@ -103,15 +99,12 @@ func TestPostgresFailedMigrationLeavesNoTrace(t *testing.T) {
 
 func TestPostgresRepeatable(t *testing.T) { runRepeatable(t, openPostgres(t), migrate.Postgres) }
 
-// Audit regression: Recreate used to fail on Postgres for any table-level
-// primary key (the temp table claimed the live pkey's backing-index name),
-// and left the identity sequence behind the copied rows.
+// Recreate must avoid live primary-key names and advance identity sequences.
 func TestPostgresRecreate(t *testing.T) {
 	ctx := context.Background()
 	db := openPostgres(t)
 	dropAll(t, db)
-	// orders and counters are unique to this test; dropAll only clears the
-	// shared tables, so drop any residue here to stay idempotent across runs.
+	// These tables are outside dropAll's shared fixture.
 	for _, table := range []string{"orders", "counters"} {
 		if _, err := db.Exec("DROP TABLE IF EXISTS " + table); err != nil {
 			t.Fatalf("drop %s: %v", table, err)
@@ -121,13 +114,13 @@ func TestPostgresRecreate(t *testing.T) {
 	c := migrate.NewCollection()
 	c.Add("001_orders", func(s *migrate.Schema) {
 		s.Create("orders", func(t *migrate.Table) {
-			t.Integer("code").Primary() // table-level named PK: the collision case
+			t.Integer("code").Primary()
 			t.String("state")
 		})
 	})
 	c.Add("002_counters", func(s *migrate.Schema) {
 		s.Create("counters", func(t *migrate.Table) {
-			t.ID() // identity: the sequence case
+			t.ID()
 			t.String("name")
 		})
 	})
@@ -153,18 +146,16 @@ func TestPostgresRecreate(t *testing.T) {
 		})
 	}, migrate.WithDown(func(s *migrate.Schema) {}))
 	if err := m.Up(ctx); err != nil {
-		t.Fatalf("Up with recreates: %v", err) // pre-fix: relation "orders_pkey" already exists
+		t.Fatalf("Up with recreates: %v", err)
 	}
 
-	// The PK carries its conventional name after the swap.
 	if got := count(t, db, `SELECT COUNT(*) FROM pg_constraint WHERE conname = 'orders_pkey'`); got != 1 {
 		t.Errorf("orders_pkey should exist after the rebuild, got %d", got)
 	}
 	if got := count(t, db, `SELECT COUNT(*) FROM pg_constraint WHERE conname LIKE '%__migrate_new%'`); got != 0 {
 		t.Error("no constraint may keep the temporary name")
 	}
-	// The identity sequence advanced past the copied rows: the next insert
-	// must not collide (pre-fix: duplicate key on counters_pkey).
+	// The copied identity sequence must advance past existing rows.
 	mustExec(t, db, "INSERT INTO counters (name) VALUES ('c')")
 	if got := count(t, db, "SELECT MAX(id) FROM counters"); got != 3 {
 		t.Errorf("the new row should take id 3, max = %d", got)
@@ -174,9 +165,7 @@ func TestPostgresRecreate(t *testing.T) {
 	}
 }
 
-// Audit H5: DROP TABLE takes the table's triggers with it on Postgres too;
-// the rebuild must capture them (pg_get_triggerdef) and recreate them once
-// the rename lands, and they must keep firing.
+// Recreate must restore triggers removed with PostgreSQL's old table.
 func TestPostgresRecreateKeepsTriggers(t *testing.T) {
 	ctx := context.Background()
 	db := openPostgres(t)
@@ -231,9 +220,7 @@ func TestPostgresRecreateKeepsTriggers(t *testing.T) {
 	}
 }
 
-// Codex round 2: recreating a parent table referenced by child foreign keys
-// is impossible on Postgres (definition-level dependency). The failure must
-// be clean — transaction rolled back, original table and data intact.
+// A blocked Recreate must roll back with the original table and data intact.
 func TestPostgresRecreateReferencedParentFailsCleanly(t *testing.T) {
 	ctx := context.Background()
 	db := openPostgres(t)
@@ -261,8 +248,6 @@ func TestPostgresRecreateReferencedParentFailsCleanly(t *testing.T) {
 	if err := m.Up(ctx); err == nil {
 		t.Fatal("recreating a referenced parent must fail on Postgres")
 	}
-	// Clean failure: table, data and records intact; the failed migration
-	// unrecorded so a fixed version can run.
 	if got := count(t, db, `SELECT COUNT(*) FROM users`); got != 1 {
 		t.Errorf("users must survive the failed rebuild, got %d rows", got)
 	}

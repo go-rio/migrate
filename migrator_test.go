@@ -21,7 +21,6 @@ func testMigrator(t *testing.T, f *fakeDB, d Dialect, c *Collection, opts ...Opt
 	return m
 }
 
-// twoTables registers two reversible create-table migrations.
 func twoTables() *Collection {
 	c := NewCollection()
 	c.Add("001_users", func(s *Schema) {
@@ -33,8 +32,6 @@ func twoTables() *Collection {
 	return c
 }
 
-// appliedRecord builds a records-table row whose checksum matches what the
-// collection currently compiles to, as a real applied migration would have.
 func appliedRecord(t *testing.T, c *Collection, d Dialect, name string, batch int) record {
 	t.Helper()
 	mig := c.get(name)
@@ -72,8 +69,6 @@ func TestUpAppliesPendingInOrder(t *testing.T) {
 	assertLogSequence(t, log, want)
 }
 
-// assertLogSequence checks that each fragment appears in order, one per log
-// entry, with no unexplained entries between transaction boundaries.
 func assertLogSequence(t *testing.T, log []string, fragments []string) {
 	t.Helper()
 	i := 0
@@ -249,7 +244,6 @@ func TestRollbackSteps(t *testing.T) {
 	if err := m.Rollback(context.Background(), 1); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
-	// Within one batch the later name rolls back first.
 	if len(f.loggedContaining(`DROP TABLE "posts"`)) != 1 || len(f.loggedContaining(`DROP TABLE "users"`)) != 0 {
 		t.Errorf("Steps(1) should undo only 002_posts; log:\n%s", strings.Join(f.logged(), "\n"))
 	}
@@ -266,8 +260,6 @@ func TestResetRollsBackEverything(t *testing.T) {
 	if err := m.Reset(context.Background()); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	// Two per-migration record deletions plus the sweep that forgets
-	// repeatable records.
 	if len(f.loggedContaining("DROP TABLE")) != 2 || len(f.loggedContaining("DELETE FROM")) != 3 {
 		t.Errorf("Reset should undo both migrations; log:\n%s", strings.Join(f.logged(), "\n"))
 	}
@@ -309,15 +301,12 @@ func TestMySQLFailureExplainsImplicitCommit(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "commits implicitly") {
 		t.Fatalf("MySQL failures should explain implicit commits, got: %v", err)
 	}
-	// Audit M17: the note must name the committed prefix, not gesture at it.
 	if !strings.Contains(err.Error(), "statement 1 of this migration is already committed") {
 		t.Errorf("the note should name exactly what committed, got: %v", err)
 	}
 }
 
-// Audit M17: the implicit-commit note was gated on the dialect alone, so a
-// pure-DML data migration — which MySQL's transaction fully protects — failed
-// with instructions to reconcile schema damage that never happened.
+// Pure DML failures must not claim that MySQL committed schema changes.
 func TestMySQLPureDMLFailureReportsCleanRollback(t *testing.T) {
 	f := newFakeDB()
 	c := NewCollection()
@@ -338,16 +327,14 @@ func TestMySQLPureDMLFailureReportsCleanRollback(t *testing.T) {
 	}
 }
 
-// Audit M17: MySQL's implicit commit takes the DML before a DDL along with
-// it, and statements after one commit individually under autocommit — the
-// note must cover the whole executed prefix, not just "earlier DDL".
+// MySQL failure diagnostics must identify the entire committed prefix.
 func TestMySQLMixedFailureNamesCommittedPrefix(t *testing.T) {
 	f := newFakeDB()
 	c := NewCollection()
 	c.Add("001_mixed", func(s *Schema) {
-		s.Exec("INSERT INTO audit (op) VALUES ('start')") // committed with the DDL
-		s.Create("b", func(t *Table) { t.ID() })          // the implicit commit
-		s.Exec("INSERT INTO audit (op) VALUES ('mid')")   // autocommitted
+		s.Exec("INSERT INTO audit (op) VALUES ('start')")
+		s.Create("b", func(t *Table) { t.ID() })
+		s.Exec("INSERT INTO audit (op) VALUES ('mid')")
 		s.Exec("INSERT INTO broken (x) VALUES (1)")
 	}, WithDown(func(s *Schema) {}))
 	f.fail("broken", errors.New("boom"))
@@ -356,8 +343,7 @@ func TestMySQLMixedFailureNamesCommittedPrefix(t *testing.T) {
 		t.Fatalf("the note should cover the whole executed prefix, got: %v", err)
 	}
 
-	// A failure before any DDL ran leaves the database untouched, even in a
-	// migration that would have executed DDL later.
+	// Failure before the first DDL remains fully transactional.
 	f2 := newFakeDB()
 	f2.fail("INSERT INTO audit", errors.New("boom"))
 	err = testMigrator(t, f2, MySQL, c).Up(context.Background())
@@ -394,12 +380,7 @@ func TestSQLiteSkipsLocking(t *testing.T) {
 	}
 }
 
-// Audit LB11: SQLite has no advisory lock — its single-writer model
-// serializes the migration transactions themselves. Recording the migration
-// before its statements makes the bookkeeping row the transaction's first
-// write, so a lost race fails on the records table's primary key before any
-// schema statement runs, and that failure translates to guidance instead of
-// leaking a raw "already exists" from halfway through.
+// SQLite records first so a lost race fails before schema changes.
 func TestSQLiteRecordsFirstAndTranslatesLostRace(t *testing.T) {
 	f := newFakeDB()
 	m := testMigrator(t, f, SQLite, twoTables())
@@ -411,7 +392,6 @@ func TestSQLiteRecordsFirstAndTranslatesLostRace(t *testing.T) {
 		"BEGIN", `INSERT INTO "schema_migrations"`, `CREATE TABLE "posts"`, "COMMIT",
 	})
 
-	// A racer that lost gets guidance, not the raw constraint error.
 	f2 := newFakeDB()
 	f2.fail(`INSERT INTO "schema_migrations"`, errors.New("UNIQUE constraint failed: schema_migrations.version"))
 	err := testMigrator(t, f2, SQLite, twoTables()).Up(context.Background())
@@ -425,7 +405,6 @@ func TestSQLiteRecordsFirstAndTranslatesLostRace(t *testing.T) {
 		t.Error("the losing transaction must roll back")
 	}
 
-	// A genuine bookkeeping failure that is not a duplicate key stays raw.
 	f3 := newFakeDB()
 	f3.fail(`INSERT INTO "schema_migrations"`, errors.New("disk I/O error"))
 	err = testMigrator(t, f3, SQLite, twoTables()).Up(context.Background())
@@ -603,9 +582,6 @@ func TestNewValidation(t *testing.T) {
 	}
 }
 
-// Ensure defaultCollection wiring works end to end without interfering with
-// other tests: register into a scratch collection via the package-level Add
-// guard test only checks the panic path indirectly elsewhere.
 func TestUpNothingPending(t *testing.T) {
 	f := newFakeDB()
 	c := twoTables()
@@ -648,10 +624,7 @@ func TestFreshDropsEverythingThenMigrates(t *testing.T) {
 	})
 }
 
-// Audit M16: if the records table somehow survives the drops (somewhere
-// listTables cannot see), the following Up would read its stale records and
-// skip every migration over an empty database. Fresh must notice and fail
-// instead of reporting success.
+// Fresh must fail if stale migration records survive the table drops.
 func TestFreshFailsWhenRecordsTableSurvives(t *testing.T) {
 	f := newFakeDB()
 	f.tables = []string{"users"}
@@ -659,7 +632,7 @@ func TestFreshFailsWhenRecordsTableSurvives(t *testing.T) {
 	f.setRecords(
 		appliedRecord(t, c, Postgres, "001_users", 1),
 		appliedRecord(t, c, Postgres, "002_posts", 1),
-	) // the fake never clears records: the drop "misses" the table
+	)
 	m := testMigrator(t, f, Postgres, c)
 	err := m.Fresh(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "survived the drop") {
@@ -670,25 +643,21 @@ func TestFreshFailsWhenRecordsTableSurvives(t *testing.T) {
 	}
 }
 
-// Audit: a plain Rollback used to select batch-0 baseline rows once they
-// became the highest remaining batch, dropping pre-existing production
-// tables.
+// Normal rollbacks must never touch baselined rows.
 func TestRollbackNeverTouchesBaselinedRows(t *testing.T) {
 	f := newFakeDB()
 	c := twoTables()
-	base := appliedRecord(t, c, Postgres, "001_users", 0) // baselined
+	base := appliedRecord(t, c, Postgres, "001_users", 0)
 	real := appliedRecord(t, c, Postgres, "002_posts", 1)
 	f.setRecords(base, real)
 	m := testMigrator(t, f, Postgres, c)
 
-	// First rollback undoes the real batch.
 	if err := m.RollbackBatch(context.Background()); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if len(f.loggedContaining(`DROP TABLE "posts"`)) != 1 {
 		t.Error("the real migration should roll back")
 	}
-	// Second rollback finds only the baseline left — and must not touch it.
 	f.setRecords(base)
 	if err := m.RollbackBatch(context.Background()); err != nil {
 		t.Fatalf("second Rollback: %v", err)
@@ -703,7 +672,6 @@ func TestRollbackNeverTouchesBaselinedRows(t *testing.T) {
 		t.Fatal("a step rollback must never drop baselined tables either")
 	}
 
-	// Reset is the documented exception.
 	if err := m.Reset(context.Background()); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
@@ -712,13 +680,11 @@ func TestRollbackNeverTouchesBaselinedRows(t *testing.T) {
 	}
 }
 
-// Codex round 2 (API reshaped in v0.4): a non-positive step count must fail
-// before anything loads — negative values used to alias Reset internally and
-// bypass the baseline protection.
+// Non-positive rollback counts must fail before loading or executing.
 func TestRollbackRejectsNonPositiveSteps(t *testing.T) {
 	f := newFakeDB()
 	c := twoTables()
-	f.setRecords(appliedRecord(t, c, Postgres, "001_users", 0)) // baselined
+	f.setRecords(appliedRecord(t, c, Postgres, "001_users", 0))
 	m := testMigrator(t, f, Postgres, c)
 	for _, n := range []int{0, -1, -100} {
 		if err := m.Rollback(context.Background(), n); err == nil ||
@@ -734,8 +700,7 @@ func TestRollbackRejectsNonPositiveSteps(t *testing.T) {
 	}
 }
 
-// Audit: sub-second MySQL lock timeouts truncated to GET_LOCK(..., 0),
-// silently disabling the wait.
+// MySQL lock timeouts round up to whole seconds.
 func TestMySQLLockTimeoutRoundsUp(t *testing.T) {
 	for timeout, want := range map[time.Duration]int64{
 		500 * time.Millisecond:  1,
@@ -747,7 +712,6 @@ func TestMySQLLockTimeoutRoundsUp(t *testing.T) {
 			t.Errorf("GET_LOCK seconds for %v = %d, want %d", timeout, got, want)
 		}
 	}
-	// And the full path still works with a sub-second timeout configured.
 	f := newFakeDB()
 	m := testMigrator(t, f, MySQL, twoTables(), WithLockTimeout(500*time.Millisecond))
 	if err := m.Up(context.Background()); err != nil {
@@ -755,10 +719,9 @@ func TestMySQLLockTimeoutRoundsUp(t *testing.T) {
 	}
 }
 
-// Self-review round 4: combination gaps found by walking the option matrix.
 func TestBaselineValidation(t *testing.T) {
 	f := newFakeDB()
-	c := viewCollection("active") // one versioned + one repeatable
+	c := viewCollection("active")
 	m := testMigrator(t, f, Postgres, c)
 
 	if err := m.Baseline(context.Background(), "a", "b"); err == nil {

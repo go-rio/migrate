@@ -1,8 +1,5 @@
-// Package integration exercises github.com/go-rio/migrate against real
-// databases. It lives in its own module so the parent stays free of
-// third-party dependencies. SQLite (pure Go) always runs; Postgres and MySQL
-// run when MIGRATE_POSTGRES_DSN / MIGRATE_MYSQL_DSN point at a server, as CI
-// does with service containers.
+// Package integration exercises migrate against live databases.
+// SQLite always runs; Postgres and MySQL run when their DSNs are configured.
 package integration
 
 import (
@@ -15,7 +12,6 @@ import (
 	"github.com/go-rio/migrate"
 )
 
-// appSchema registers the reference migrations used across all engines.
 func appSchema() *migrate.Collection {
 	c := migrate.NewCollection()
 	c.Add("001_create_users", func(s *migrate.Schema) {
@@ -64,8 +60,6 @@ func count(t *testing.T, db *sql.DB, query string) int {
 	return n
 }
 
-// runEndToEnd drives the full lifecycle — apply, constraint behaviour,
-// idempotency, rollback, reset — against a live database.
 func runEndToEnd(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	ctx := context.Background()
 	dropAll(t, db)
@@ -75,13 +69,10 @@ func runEndToEnd(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Fatalf("New: %v", err)
 	}
 
-	// Apply everything.
 	if err := m.Up(ctx); err != nil {
 		t.Fatalf("Up: %v", err)
 	}
 
-	// The declared schema behaves: defaults fill, uniques reject, foreign
-	// keys cascade, enums constrain.
 	mustExec(t, db, `INSERT INTO users (email, name) VALUES ('a@x.dev', 'A')`)
 	mustExec(t, db, `INSERT INTO users (email, name) VALUES ('b@x.dev', 'B')`)
 	if _, err := db.Exec(`INSERT INTO users (email, name) VALUES ('a@x.dev', 'dup')`); err == nil {
@@ -99,7 +90,6 @@ func runEndToEnd(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Errorf("deleting the user should cascade to posts, count = %d", got)
 	}
 
-	// A second Up is a no-op.
 	if err := m.Up(ctx); err != nil {
 		t.Fatalf("second Up: %v", err)
 	}
@@ -114,8 +104,6 @@ func runEndToEnd(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Errorf("nothing should be pending, got %+v", plans)
 	}
 
-	// Roll back the latest batch: both migrations were one batch here, so
-	// step once instead.
 	if err := m.Rollback(ctx, 1); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
@@ -126,7 +114,6 @@ func runEndToEnd(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Error("users must survive rolling back the posts migration")
 	}
 
-	// Re-apply, then reset everything.
 	if err := m.Up(ctx); err != nil {
 		t.Fatalf("re-Up: %v", err)
 	}
@@ -143,9 +130,6 @@ func runEndToEnd(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	}
 }
 
-// runChecksumFlow verifies drift detection and repair against a live records
-// table: apply, mutate the declaration, observe the warning path, the strict
-// failure, and the repair.
 func runChecksumFlow(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	ctx := context.Background()
 	dropAll(t, db)
@@ -166,7 +150,6 @@ func runChecksumFlow(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Fatalf("Up: %v", err)
 	}
 
-	// The same migration, edited after the fact.
 	edited := build(191)
 	strict, _ := migrate.New(db, dialect, migrate.WithCollection(edited), migrate.WithStrictChecksum())
 	if err := strict.Up(ctx); !errors.Is(err, migrate.ErrChecksumMismatch) {
@@ -177,7 +160,6 @@ func runChecksumFlow(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Fatalf("status should report drift: %+v", sts)
 	}
 
-	// Repair accepts the edited declaration; strict mode passes afterwards.
 	if err := strict.Repair(ctx); err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
@@ -186,8 +168,6 @@ func runChecksumFlow(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	}
 }
 
-// runDataMigration verifies Run functions execute inside the migration and
-// see prior schema changes.
 func runDataMigration(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	ctx := context.Background()
 	dropAll(t, db)
@@ -222,9 +202,6 @@ func runDataMigration(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	}
 }
 
-// runRepeatable verifies the full repeatable lifecycle against a live
-// database: first run creates the view, an unchanged run skips it, an edited
-// declaration re-runs it, and rollback leaves it alone.
 func runRepeatable(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	ctx := context.Background()
 	dropAll(t, db)
@@ -232,8 +209,7 @@ func runRepeatable(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Fatalf("drop view: %v", err)
 	}
 
-	// SQLite has no CREATE OR REPLACE VIEW; drop-then-create is the portable
-	// idempotent declaration and exercises multi-statement repeatables.
+	// Drop-then-create keeps the repeatable portable to SQLite.
 	build := func(minAge int) *migrate.Collection {
 		c := migrate.NewCollection()
 		c.Add("001_people", func(s *migrate.Schema) {
@@ -264,12 +240,10 @@ func runRepeatable(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Fatalf("view with age >= 18 should see 2 rows, got %d", got)
 	}
 
-	// Unchanged: nothing to do, view keeps working.
 	if err := m18.Up(ctx); err != nil {
 		t.Fatalf("second Up: %v", err)
 	}
 
-	// Edited declaration re-runs against the same records table.
 	m21, err := migrate.New(db, dialect, migrate.WithCollection(build(21)))
 	if err != nil {
 		t.Fatal(err)
@@ -288,9 +262,7 @@ func runRepeatable(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Fatalf("view with age >= 21 should see 1 row, got %d", got)
 	}
 
-	// Rolling back the table the view depends on: Postgres refuses while the
-	// view exists (dependency protection — exactly right), so the real-world
-	// flow drops the dependent object first.
+	// Postgres requires dependent views to be dropped before rollback.
 	if _, err := db.Exec("DROP VIEW IF EXISTS adults"); err != nil {
 		t.Fatalf("drop dependent view: %v", err)
 	}
@@ -302,7 +274,6 @@ func runRepeatable(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	}
 }
 
-// runBaseline verifies adopting an existing database without executing.
 func runBaseline(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 	ctx := context.Background()
 	dropAll(t, db)

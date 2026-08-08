@@ -55,7 +55,7 @@ func TestQualifiedRecreateStaysInSchema(t *testing.T) {
 		`-- capture the triggers of "aux"."items"`,
 		`DROP TABLE "aux"."items"`,
 		`ALTER TABLE "aux"."items__migrate_new" RENAME TO "items"`,
-		// SQLite qualifies the index name, not the table.
+		// SQLite qualifies the index name.
 		`CREATE UNIQUE INDEX "aux"."items_name_unique" ON "items" ("name")`,
 		`-- recreate the captured triggers of "aux"."items"`,
 	}
@@ -83,10 +83,7 @@ func TestQualifiedRecordsTable(t *testing.T) {
 	}
 }
 
-// Audit M16: listTables sees only the current schema, so a records table
-// qualified into another schema survived Fresh with every migration still
-// recorded — the following Up then skipped everything and reported success
-// over an empty database.
+// Fresh cannot safely enumerate a records table in another schema.
 func TestFreshDropsQualifiedRecordsTable(t *testing.T) {
 	f := newFakeDB()
 	f.tables = []string{"users"}
@@ -102,8 +99,7 @@ func TestFreshDropsQualifiedRecordsTable(t *testing.T) {
 	}
 }
 
-// Audit: cross-schema renames silently stayed in the source schema on
-// Postgres and SQLite while MySQL moved the table.
+// Only MySQL can move a table across schemas by renaming it.
 func TestCrossSchemaRenameRefused(t *testing.T) {
 	s := &Schema{}
 	s.Rename("public.orders", "archive.orders")
@@ -116,7 +112,6 @@ func TestCrossSchemaRenameRefused(t *testing.T) {
 	if _, err := MySQL.compile(s.ops[0]); err != nil {
 		t.Fatalf("mysql legitimately moves tables across databases: %v", err)
 	}
-	// Same-schema qualified renames keep working.
 	s = &Schema{}
 	s.Rename("analytics.a", "analytics.b")
 	if _, err := Postgres.compile(s.ops[0]); err != nil {
@@ -124,7 +119,6 @@ func TestCrossSchemaRenameRefused(t *testing.T) {
 	}
 }
 
-// Audit: RenameIndex ignored the table's schema on Postgres.
 func TestRenameIndexQualified(t *testing.T) {
 	got := compileSchema(t, Postgres, func(s *Schema) {
 		s.Table("analytics.events", func(t *Table) {

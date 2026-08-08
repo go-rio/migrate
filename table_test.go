@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// TestColumnKindMapping drives every portable column kind through all three
-// dialects and checks the native type each one lands on.
 func TestColumnKindMapping(t *testing.T) {
 	declare := func(s *Schema) {
 		s.Create("kitchen", func(t *Table) {

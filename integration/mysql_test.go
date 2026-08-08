@@ -10,8 +10,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// openMySQL connects to MIGRATE_MYSQL_DSN or skips, e.g.
-// root:root@tcp(localhost:3306)/migrate_test
+// openMySQL skips unless MIGRATE_MYSQL_DSN is set.
 func openMySQL(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("MIGRATE_MYSQL_DSN")

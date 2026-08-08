@@ -10,23 +10,16 @@ import (
 	"sync"
 )
 
-// Sentinel errors. Failures wrap these, so errors.Is works across the
-// additional context.
 var (
-	// ErrIrreversible marks a rollback of a migration that cannot be
-	// reversed automatically and declares no explicit down.
+	// ErrIrreversible marks a migration with no automatic or explicit rollback.
 	ErrIrreversible = errors.New("migrate: migration cannot be automatically reversed")
-	// ErrLockTimeout marks a failure to acquire the advisory lock, meaning
-	// another migrator held it for the whole wait.
+	// ErrLockTimeout marks a timed-out advisory lock acquisition.
 	ErrLockTimeout = errors.New("migrate: timed out waiting for the migration lock")
-	// ErrChecksumMismatch marks an applied migration whose declaration no
-	// longer produces the SQL it was applied with.
+	// ErrChecksumMismatch marks an edited applied migration.
 	ErrChecksumMismatch = errors.New("migrate: checksum mismatch")
 )
 
-// Migration is a registered migration: a name that orders and identifies it,
-// and a declaration function. Values are created by Add or AddRepeatable and
-// immutable afterwards.
+// Migration is an immutable registered declaration.
 type Migration struct {
 	name       string
 	up         func(*Schema)
@@ -42,31 +35,23 @@ func (m *Migration) Name() string { return m.name }
 // MigrationOption configures a single migration at registration time.
 type MigrationOption func(*Migration)
 
-// WithDown declares an explicit down migration, needed when up records
-// irreversible operations (Drop, DropColumn, Exec, Run) and the migration
-// should still be able to roll back.
+// WithDown defines rollback for otherwise irreversible operations.
 func WithDown(down func(*Schema)) MigrationOption {
 	return func(m *Migration) { m.down = down }
 }
 
-// WithoutTransaction runs the migration outside a transaction, required for
-// statements that refuse to run inside one, such as Postgres's
-// CREATE INDEX CONCURRENTLY. Without a transaction a mid-migration failure
-// leaves earlier statements applied — keep such migrations to a single
-// statement where possible.
+// WithoutTransaction permits statements such as PostgreSQL CREATE INDEX
+// CONCURRENTLY. Earlier statements may remain applied after a failure.
 func WithoutTransaction() MigrationOption {
 	return func(m *Migration) { m.useTx = false }
 }
 
-// upOps runs the declaration function and returns the recorded operations.
 func (m *Migration) upOps() ([]operation, error) {
 	s := &Schema{}
 	m.up(s)
 	return s.ops, validateSchema(m.name, s)
 }
 
-// downOps returns the operations that roll the migration back: the explicit
-// down when declared, otherwise the up operations reversed in reverse order.
 func (m *Migration) downOps() ([]operation, error) {
 	if m.down != nil {
 		s := &Schema{}
@@ -88,7 +73,6 @@ func (m *Migration) downOps() ([]operation, error) {
 	return downs, nil
 }
 
-// validateSchema surfaces declaration mistakes collected while recording.
 func validateSchema(name string, s *Schema) error {
 	errs := append([]error(nil), s.errs...)
 	check := func(table string, cols []*columnDef, altering bool) {
@@ -110,7 +94,7 @@ func validateSchema(name string, s *Schema) error {
 				errs = append(errs, fmt.Errorf("column %q of table %q declares both CopyFrom and SkipCopy", c.name, table))
 			}
 			if c.primary && c.nullable {
-				// SQLite would honour the contradiction and accept NULL keys.
+				// SQLite otherwise accepts the contradictory NULL primary key.
 				errs = append(errs, fmt.Errorf("primary key column %q of table %q cannot be nullable", c.name, table))
 			}
 			if c.change && !altering {
@@ -168,9 +152,7 @@ func validateSchema(name string, s *Schema) error {
 	return fmt.Errorf("migration %q: %w", name, declarationErrors(errs))
 }
 
-// checksum fingerprints the migration as the SQL it compiles to under the
-// given dialect. Statement text and raw arguments participate; the body of a
-// Run function cannot, so edits to Go logic are not detectable.
+// checksum covers compiled SQL and arguments, but not opaque Run functions.
 func (m *Migration) checksum(d Dialect) (string, error) {
 	stmts, err := m.compile(d, true)
 	if err != nil {
@@ -191,7 +173,6 @@ func (m *Migration) checksum(d Dialect) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// compile renders the migration to statements for the dialect.
 func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
 	ops, err := m.upOps()
 	if !up {
@@ -203,15 +184,12 @@ func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
 	if !m.useTx {
 		for _, op := range ops {
 			if _, ok := op.(*recreateTable); ok {
-				// Without the transaction, a failure between the DROP and the
-				// rename leaves the live table gone — the exact window the
-				// MySQL gate exists for.
+				// A failure between DROP and rename would lose the live table.
 				return nil, fmt.Errorf("migration %q: Recreate requires the migration's transaction; keep WithoutTransaction statements in a separate migration", m.name)
 			}
 		}
 	}
-	// Postgres refuses CREATE/DROP INDEX CONCURRENTLY inside a transaction;
-	// surface the conflict at compile time instead of from the server.
+	// PostgreSQL refuses concurrent index operations inside transactions.
 	if m.useTx && d.name() == "postgres" {
 		if idx := firstConcurrentIndex(ops); idx != "" {
 			return nil, fmt.Errorf("migration %q: index %q builds Concurrently, which cannot run inside a transaction; declare the migration WithoutTransaction()", m.name, idx)
@@ -233,8 +211,6 @@ func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
 	return stmts, nil
 }
 
-// firstConcurrentIndex returns the resolved name of the first index declared
-// Concurrently among the operations, or "" when there is none.
 func firstConcurrentIndex(ops []operation) string {
 	fromDef := func(def *tableDef) string {
 		for _, idx := range def.indexes {
@@ -272,11 +248,7 @@ func firstConcurrentIndex(ops []operation) string {
 	return ""
 }
 
-// operationCommitsImplicitly reports whether an operation's statements end a
-// MySQL transaction implicitly, which decides what a failure note can claim
-// about the executed prefix. Schema operations always compile to DDL; raw SQL
-// is classified by its leading keyword; a Run function is taken at its
-// documented word — a data migration.
+// operationCommitsImplicitly classifies MySQL's transaction-ending DDL.
 func operationCommitsImplicitly(op operation) bool {
 	switch o := op.(type) {
 	case *rawSQL:
@@ -288,10 +260,7 @@ func operationCommitsImplicitly(op operation) bool {
 	}
 }
 
-// plainDMLSQL recognizes raw statements that stay transactional on MySQL.
-// Anything else — CREATE, ALTER, DROP, TRUNCATE, unrecognized — is treated as
-// implicitly committing, so the failure note never understates what
-// persisted.
+// plainDMLSQL stays conservative so failure reports never understate commits.
 func plainDMLSQL(sql string) bool {
 	fields := strings.Fields(sql)
 	if len(fields) == 0 {
@@ -304,10 +273,7 @@ func plainDMLSQL(sql string) bool {
 	return false
 }
 
-// Collection is an ordered, named set of migrations. The package-level Add
-// registers into a default collection, which suits the common one-app layout;
-// tests and libraries embedding several migration sets can keep explicit
-// collections instead.
+// Collection is a named migration set. Package-level Add uses a default one.
 type Collection struct {
 	mu     sync.Mutex
 	byName map[string]*Migration
@@ -318,34 +284,15 @@ func NewCollection() *Collection {
 	return &Collection{byName: map[string]*Migration{}}
 }
 
-// Add registers a migration. The name orders migrations lexically and is
-// recorded in the database, so give it a sortable timestamp prefix:
-//
-//	c.Add("20260708093000_create_users", func(s *migrate.Schema) { ... })
-//
-// Add panics on an empty, oversized or duplicate name or a nil function:
-// registration happens at init time, where a broken migration set should
-// stop the program.
+// Add registers a lexically ordered migration. It panics on invalid names,
+// duplicates, or a nil declaration.
 func (c *Collection) Add(name string, up func(*Schema), opts ...MigrationOption) {
 	c.add(name, up, false, opts)
 }
 
-// AddRepeatable registers a repeatable migration: instead of running once, it
-// runs whenever its declaration compiles to different SQL than last recorded
-// — after all versioned migrations, in name order. Views, stored functions,
-// triggers and reference data live here, declared idempotently
-// (CREATE OR REPLACE ...), so editing the declaration in place is the whole
-// workflow:
-//
-//	c.AddRepeatable("active_users_view", func(s *migrate.Schema) {
-//		s.Exec(`CREATE OR REPLACE VIEW active_users AS SELECT ...`)
-//	})
-//
-// Rollback never touches repeatable migrations (there is nothing to return
-// to); Reset forgets their records so the next Up runs them again. A Run
-// function's body is invisible to the checksum, so editing only Go logic does
-// not trigger a re-run. Declaring WithDown panics — a repeatable migration
-// has no down.
+// AddRepeatable registers an idempotent declaration that reruns when its SQL
+// checksum changes. Repeatables run after versioned migrations and have no
+// rollback; Reset forgets their records.
 func (c *Collection) AddRepeatable(name string, run func(*Schema), opts ...MigrationOption) {
 	c.add(name, run, true, opts)
 }
@@ -378,19 +325,16 @@ func (c *Collection) add(name string, up func(*Schema), repeatable bool, opts []
 	c.byName[name] = m
 }
 
-// get returns the migration registered under name, or nil.
 func (c *Collection) get(name string) *Migration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.byName[name]
 }
 
-// sorted returns the versioned migrations in name order.
 func (c *Collection) sorted() []*Migration {
 	return c.list(false)
 }
 
-// repeatables returns the repeatable migrations in name order.
 func (c *Collection) repeatables() []*Migration {
 	return c.list(true)
 }
@@ -410,26 +354,12 @@ func (c *Collection) list(repeatable bool) []*Migration {
 
 var defaultCollection = NewCollection()
 
-// Add registers a migration in the default collection, the usual form inside
-// a migrations package where each file registers itself:
-//
-//	func init() {
-//		migrate.Add("20260708093000_create_users", func(s *migrate.Schema) {
-//			s.Create("users", func(t *migrate.Table) {
-//				t.ID()
-//				t.String("email").Unique()
-//				t.Timestamps()
-//			})
-//		})
-//	}
-//
-// See Collection.Add for naming rules and panics.
+// Add registers a migration in the default collection.
 func Add(name string, up func(*Schema), opts ...MigrationOption) {
 	defaultCollection.Add(name, up, opts...)
 }
 
 // AddRepeatable registers a repeatable migration in the default collection.
-// See Collection.AddRepeatable for semantics.
 func AddRepeatable(name string, run func(*Schema), opts ...MigrationOption) {
 	defaultCollection.AddRepeatable(name, run, opts...)
 }

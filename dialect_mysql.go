@@ -8,12 +8,8 @@ import (
 	"time"
 )
 
-// MySQL is the MySQL dialect. It expects MySQL 8.0 or newer (or an equivalent
-// MariaDB release) for RENAME COLUMN and expression defaults.
-//
-// MySQL commits implicitly around every DDL statement, so unlike Postgres and
-// SQLite a failed migration cannot roll back the DDL it already executed; the
-// error identifies the failing statement so the database can be reconciled.
+// MySQL targets MySQL 8.0+ or an equivalent MariaDB release. DDL commits
+// implicitly, so failures report the statement and persisted prefix.
 var MySQL Dialect = mysqlDialect{}
 
 type mysqlDialect struct{}
@@ -45,11 +41,7 @@ func (d mysqlDialect) compile(op operation) ([]statement, error) {
 	case *alterTable:
 		return d.compileAlter(o)
 	case *recreateTable:
-		// The copy-drop-rename sequence cannot be made atomic: a crash between
-		// the DROP and the RENAME leaves the live table gone. An atomic two-way
-		// RENAME swap does not help either — child foreign keys follow the
-		// renamed table to its backup name. MySQL's native ALTER TABLE covers
-		// every Recreate use case (MODIFY COLUMN, constraint changes).
+		// Recreate cannot be atomic on MySQL; use native ALTER TABLE instead.
 		return nil, fmt.Errorf("migrate: mysql cannot rebuild table %q atomically (DDL commits implicitly); use Schema.Table with native ALTER operations, or Exec", o.def.name)
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
@@ -75,8 +67,7 @@ func (d mysqlDialect) compileCreate(def *tableDef) ([]statement, error) {
 		clauses = append(clauses, clause)
 	}
 	if len(pk) > 0 {
-		// MySQL names every primary key PRIMARY; a constraint name would be
-		// accepted and discarded.
+		// MySQL always names the primary key PRIMARY.
 		clauses = append(clauses, fmt.Sprintf("PRIMARY KEY (%s)", myQ.idents(pk)))
 	}
 	for _, chk := range def.checks {
@@ -165,9 +156,7 @@ func (d mysqlDialect) compileAlter(op *alterTable) ([]statement, error) {
 	return stmts, nil
 }
 
-// columnSQL renders a column definition. Position modifiers (After, First)
-// only apply when altering; CREATE TABLE already places columns in
-// declaration order.
+// Position modifiers apply only while altering.
 func (d mysqlDialect) columnSQL(c *columnDef, altering bool) (string, error) {
 	typ, err := d.typeSQL(c)
 	if err != nil {
@@ -222,8 +211,7 @@ func (mysqlDialect) typeSQL(c *columnDef) (string, error) {
 	case kindChar:
 		return fmt.Sprintf("CHAR(%d)", charLength(c.length)), nil
 	case kindText:
-		// MySQL's TEXT caps at 64 KB; LONGTEXT matches the unbounded text
-		// type of the other dialects.
+		// LONGTEXT preserves the builder's unbounded Text contract.
 		return "LONGTEXT", nil
 	case kindTinyInt:
 		return unsigned("TINYINT"), nil
@@ -246,8 +234,7 @@ func (mysqlDialect) typeSQL(c *columnDef) (string, error) {
 	case kindTime:
 		return "TIME", nil
 	case kindDateTime, kindTimestamp, kindTimestampTz:
-		// DATETIME avoids TIMESTAMP's 2038 horizon and implicit-default
-		// magic; microsecond precision matches the other dialects.
+		// DATETIME(6) avoids TIMESTAMP's horizon and implicit defaults.
 		return "DATETIME(6)", nil
 	case kindJSON:
 		return "JSON", nil
@@ -266,15 +253,12 @@ func (mysqlDialect) typeSQL(c *columnDef) (string, error) {
 	}
 }
 
-// Advisory locking via GET_LOCK. The lock name mixes in the current schema so
-// migrators of different databases on one server do not exclude each other;
-// hashing keeps it under GET_LOCK's 64-character limit. Session locks release
-// automatically when the connection drops.
+// GET_LOCK is scoped by schema and records table, then hashed to its 64-byte
+// limit. The session releases it on disconnect.
 const myLockName = "CONCAT('go-rio.migrate.', MD5(CONCAT(IFNULL(DATABASE(), ''), ':', ?)))"
 
 func (mysqlDialect) lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) error {
-	// GET_LOCK counts whole seconds; round up so a sub-second timeout still
-	// waits instead of degrading to a single non-blocking attempt.
+	// GET_LOCK counts whole seconds, so round up.
 	seconds := int64((timeout + time.Second - 1) / time.Second)
 	var acquired sql.NullInt64
 	err := conn.QueryRowContext(ctx, "SELECT GET_LOCK("+myLockName+", ?)", table, seconds).Scan(&acquired)
@@ -301,8 +285,7 @@ func (mysqlDialect) unlock(ctx context.Context, conn *sql.Conn, table string) er
 
 func (mysqlDialect) quoteIdent(name string) string { return myQ.table(name) }
 
-// mysqlEscape escapes a string for a single-quoted MySQL literal, where
-// backslash is an escape character unless NO_BACKSLASH_ESCAPES is set.
+// mysqlEscape handles MySQL single-quoted literals with backslash escapes.
 func mysqlEscape(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
 }

@@ -10,27 +10,18 @@ import (
 	"time"
 )
 
-// Status describes one migration: registered in the collection, applied in
-// the database, or both.
+// Status describes a registered or recorded migration.
 type Status struct {
-	Name string
-	// Applied reports whether the database has a record of the migration.
-	Applied   bool
-	Batch     int       // batch it was applied in; 0 also marks baselined rows, -1 repeatable ones
-	AppliedAt time.Time // zero when not applied
-	// Registered is false when the database has a record but the collection
-	// has no migration by that name — usually a deleted migration file.
-	Registered bool
-	// Repeatable marks migrations registered with AddRepeatable.
+	Name       string
+	Applied    bool      // the database has a record
+	Batch      int       // batch it was applied in; 0 also marks baselined rows, -1 repeatable ones
+	AppliedAt  time.Time // zero when not applied
+	Registered bool      // the current collection contains the migration
 	Repeatable bool
-	// Drifted reports that the registered declaration no longer compiles to
-	// the SQL recorded when it was applied. For a repeatable migration that
-	// simply means the next Up re-runs it.
-	Drifted bool
+	Drifted    bool // declaration checksum differs from the record
 }
 
-// Status returns the merged view of registered and applied migrations in name
-// order. It reads without taking the migration lock.
+// Status returns registered and recorded migrations in name order.
 func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 	recs, err := m.loadState(ctx, m.db)
 	if err != nil {
@@ -72,21 +63,17 @@ func (m *Migrator) Status(ctx context.Context) ([]Status, error) {
 	return out, nil
 }
 
-// Planned is one migration as a dry run would execute it.
+// Planned is one migration in a dry-run plan.
 type Planned struct {
 	Name string
-	// Statements holds the SQL in execution order. A Run function appears as
-	// a comment placeholder — its effect cannot be rendered.
+	// Statements contains SQL in execution order; Run appears as a placeholder.
 	Statements []string
-	// Warnings holds the safety findings for this migration (empty for
-	// migrations marked Assured or when safety is off).
+	// Warnings contains safety findings.
 	Warnings []string
 }
 
-// Plan renders the SQL that Up would execute, without executing anything:
-// review it, hand it to a DBA, or diff it in CI. Pending versioned migrations
-// come first, then the repeatable migrations due for a re-run. Reading the
-// applied set is the only database access.
+// Plan renders pending SQL without executing it. Versioned migrations precede
+// changed repeatables.
 func (m *Migrator) Plan(ctx context.Context) ([]Planned, error) {
 	recs, err := m.loadState(ctx, m.db)
 	if err != nil {
@@ -144,8 +131,7 @@ func (m *Migrator) plannedFor(mig *Migration) (Planned, error) {
 	return p, nil
 }
 
-// PlanRollback renders the SQL that Rollback(ctx, steps) would execute,
-// without executing anything.
+// PlanRollback renders Rollback without executing it.
 func (m *Migrator) PlanRollback(ctx context.Context, steps int) ([]Planned, error) {
 	if steps < 1 {
 		return nil, fmt.Errorf("migrate: PlanRollback requires a positive step count, got %d", steps)
@@ -153,8 +139,7 @@ func (m *Migrator) PlanRollback(ctx context.Context, steps int) ([]Planned, erro
 	return m.planRollback(ctx, rollbackSpec{steps: steps})
 }
 
-// PlanRollbackBatch renders the SQL that RollbackBatch would execute, without
-// executing anything.
+// PlanRollbackBatch renders RollbackBatch without executing it.
 func (m *Migrator) PlanRollbackBatch(ctx context.Context) ([]Planned, error) {
 	return m.planRollback(ctx, rollbackSpec{batch: true})
 }
@@ -184,10 +169,8 @@ func (m *Migrator) planRollback(ctx context.Context, spec rollbackSpec) ([]Plann
 	return out, nil
 }
 
-// SQL renders every migration in the collection for a dialect without
-// touching any database — offline review, docs, or handing a script to a DBA.
-// Unlike Migrator.Plan it does not know what is already applied, so it
-// renders everything: versioned migrations in order, then repeatable ones.
+// SQL renders the entire collection offline: versioned migrations first,
+// then repeatables.
 func (c *Collection) SQL(dialect Dialect) ([]Planned, error) {
 	if dialect == nil {
 		return nil, errors.New("migrate: dialect must not be nil")
@@ -220,12 +203,9 @@ func renderStatements(stmts []statement) []string {
 	return out
 }
 
-// Baseline records registered migrations as applied without executing them,
-// for adopting this package on a database whose schema already exists. With
-// no argument every registered migration is baselined; with a name, versioned
-// migrations up to and including it. Repeatable migrations are always
-// baselined at their current checksum. Baselined rows carry batch 0, so the
-// first real Rollback never touches them (Reset still does).
+// Baseline records existing schema without executing migrations. An optional
+// name limits versioned migrations; repeatables are always included.
+// Rollback skips baselined rows, while Reset includes them.
 func (m *Migrator) Baseline(ctx context.Context, upTo ...string) error {
 	if len(upTo) > 1 {
 		return fmt.Errorf("migrate: Baseline takes at most one target, got %d", len(upTo))
@@ -282,25 +262,15 @@ func (m *Migrator) Baseline(ctx context.Context, upTo ...string) error {
 	})
 }
 
-// Fresh drops every table in the database — the migration records included —
-// and runs all migrations from scratch. It exists for development flow:
-// when an irreversible migration blocks Rollback, Fresh starts over instead.
-// It destroys all data; nothing about it belongs near production.
-//
-// Tables are dropped in passes until none remain, which unwinds foreign key
-// dependencies without touching session state; Postgres drops CASCADE, so
-// dependent objects such as views go too. Other standalone objects survive,
-// and idempotent repeatable migrations recreate theirs on the way back up.
+// Fresh drops every table and reapplies all migrations. It is a destructive
+// development operation and must not be used on production data.
 func (m *Migrator) Fresh(ctx context.Context) error {
 	err := m.locked(ctx, func(conn *sql.Conn) error {
 		tables, err := m.listTables(ctx, conn)
 		if err != nil {
 			return err
 		}
-		// listTables sees only the current schema; a records table qualified
-		// into another one (WithTable("aux.schema_migrations")) must join the
-		// drop set explicitly, or it survives with every migration recorded
-		// and the Up below silently skips them all.
+		// A qualified records table may be outside listTables' current schema.
 		if !slices.Contains(tables, m.cfg.table) {
 			tables = append(tables, m.cfg.table)
 		}
@@ -321,9 +291,7 @@ func (m *Migrator) Fresh(ctx context.Context) error {
 			}
 			tables = remaining
 		}
-		// Belt and braces: a records table surviving somewhere the listing
-		// cannot see would turn the coming Up into a silent no-op over an
-		// empty database. Recreate it and require it to start empty.
+		// A surviving records table would make the following Up a silent no-op.
 		if _, err := conn.ExecContext(ctx, m.d.ensureTableSQL(m.cfg.table)); err != nil {
 			return fmt.Errorf("migrate: fresh: recreate records table: %w", err)
 		}
@@ -364,11 +332,8 @@ func (m *Migrator) listTables(ctx context.Context, db DB) ([]string, error) {
 	return tables, nil
 }
 
-// Repair re-records the checksum of every applied versioned migration to its
-// current value, accepting drift after a reviewed change — most commonly an
-// upgrade of this package that renders SQL differently. Repeatable records
-// are left alone: for those a changed checksum means a pending re-run, and
-// rewriting it would silently cancel that re-run.
+// Repair accepts reviewed checksum drift for versioned migrations.
+// Repeatables are unchanged because drift schedules their next run.
 func (m *Migrator) Repair(ctx context.Context) error {
 	return m.locked(ctx, func(conn *sql.Conn) error {
 		recs, err := m.loadState(ctx, conn)

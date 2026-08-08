@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-// Change restates the complete target definition; MySQL compiles it to one
-// MODIFY COLUMN carrying every clause.
+// MySQL renders Change as a complete MODIFY COLUMN definition.
 func TestChangeColumnMySQL(t *testing.T) {
 	got := compileSchema(t, MySQL, func(s *Schema) {
 		s.Table("users", func(t *Table) {
@@ -18,8 +17,7 @@ func TestChangeColumnMySQL(t *testing.T) {
 	})
 }
 
-// Postgres has no MODIFY: the type, nullability and default each change on
-// their own, and an omitted default is dropped — a restatement, not a patch.
+// PostgreSQL renders each changed attribute separately.
 func TestChangeColumnPostgres(t *testing.T) {
 	got := compileSchema(t, Postgres, func(s *Schema) {
 		s.Table("users", func(t *Table) {
@@ -52,7 +50,6 @@ func TestChangeColumnSQLiteRefused(t *testing.T) {
 }
 
 func TestChangeColumnDeclarationRules(t *testing.T) {
-	// Change outside Schema.Table is meaningless.
 	err := compileErr(SQLite, func(s *Schema) {
 		s.Create("users", func(t *Table) {
 			t.ID()
@@ -61,33 +58,27 @@ func TestChangeColumnDeclarationRules(t *testing.T) {
 	})
 	assertErrContains(t, err, "only valid inside Schema.Table")
 
-	// Using without Change converts nothing.
 	err = compileErr(Postgres, func(s *Schema) {
 		s.Table("users", func(t *Table) { t.String("name").Using("name::text") })
 	})
 	assertErrContains(t, err, "Using without Change")
 
-	// Index modifiers cannot be restated: the existing indexes stay.
 	err = compileErr(Postgres, func(s *Schema) {
 		s.Table("users", func(t *Table) { t.String("name").Unique().Change() })
 	})
 	assertErrContains(t, err, "Unique/Index")
 
-	// Using is the Postgres conversion expression; MySQL converts implicitly.
 	err = compileErr(MySQL, func(s *Schema) {
 		s.Table("users", func(t *Table) { t.Integer("age").Change().Using("age::integer") })
 	})
 	assertErrContains(t, err, "implicitly")
 
-	// Postgres emulates enums with a check constraint Change cannot restate.
 	err = compileErr(Postgres, func(s *Schema) {
 		s.Table("users", func(t *Table) { t.Enum("role", "a", "b").Change() })
 	})
 	assertErrContains(t, err, "check constraint")
 }
 
-// A changed column discards its previous definition, so the automatic down
-// refuses and asks for WithDown.
 func TestChangeColumnIrreversible(t *testing.T) {
 	m := &Migration{name: "m", useTx: true, up: func(s *Schema) {
 		s.Table("users", func(t *Table) { t.String("name", 500).Change() })

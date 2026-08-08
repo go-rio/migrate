@@ -8,8 +8,6 @@ import (
 	"testing"
 )
 
-// viewCollection returns one versioned migration plus a repeatable view whose
-// definition is parameterised, so tests can "edit" it between runs.
 func viewCollection(where string) *Collection {
 	c := NewCollection()
 	c.Add("001_users", func(s *Schema) {
@@ -110,7 +108,6 @@ func TestRepeatableChecksumChangeIsNotDrift(t *testing.T) {
 		appliedRecord(t, edited, Postgres, "001_users", 1),
 		repeatableRecord(t, old, "active_users_view"),
 	)
-	// Strict checksum mode must not reject a pending repeatable re-run.
 	m := testMigrator(t, f, Postgres, edited, WithStrictChecksum())
 	if err := m.Up(context.Background()); err != nil {
 		t.Fatalf("Up under strict checksums: %v", err)
@@ -224,8 +221,7 @@ func TestCollectionSQLIncludesRepeatables(t *testing.T) {
 	}
 }
 
-// Audit: Repair used to rewrite a drifted repeatable's checksum, silently
-// cancelling its pending re-run.
+// Repair must not cancel a pending repeatable re-run.
 func TestRepairLeavesRepeatablesDue(t *testing.T) {
 	f := newFakeDB()
 	old := viewCollection("active")
@@ -241,7 +237,6 @@ func TestRepairLeavesRepeatablesDue(t *testing.T) {
 	if len(f.loggedContaining("UPDATE \"schema_migrations\" SET checksum")) != 0 {
 		t.Fatal("Repair must not rewrite repeatable checksums")
 	}
-	// The re-run stays due.
 	recs := []record{repeatableRecord(t, old, "active_users_view")}
 	due, _, err := m.dueRepeatables(recs)
 	if err != nil {

@@ -8,18 +8,9 @@ import (
 	"time"
 )
 
-// SQLite is the SQLite dialect. It expects SQLite 3.35 or newer for
-// ALTER TABLE DROP COLUMN.
-//
-// SQLite cannot alter constraints after a table exists: adding or dropping
-// foreign keys and primary keys compiles to a clear error rather than
-// silently skipping the change — declare them when creating the table, or
-// change them with Schema.Recreate, which rebuilds the table while keeping
-// its rows. Advisory locking is a no-op: the single-writer database file
-// serializes the migration transactions themselves, and each migration
-// records itself as its transaction's first write, so a racing migrator
-// loses on the records table — cleanly, before touching the schema — rather
-// than halfway through with "already exists".
+// SQLite targets SQLite 3.35+. Constraint alterations require Schema.Recreate.
+// Its single-writer transaction and record-first bookkeeping replace advisory
+// locking.
 var SQLite Dialect = sqliteDialect{}
 
 type sqliteDialect struct{}
@@ -47,7 +38,7 @@ func (d sqliteDialect) compile(op operation) ([]statement, error) {
 	case *dropTable:
 		return []statement{dropTableSQL(liteQ, o)}, nil
 	case *renameTable:
-		// RENAME TO takes a bare name: renames stay within the schema.
+		// RENAME TO takes a bare name within the schema.
 		if schemaPrefix(o.from) != schemaPrefix(o.to) {
 			return nil, fmt.Errorf("migrate: sqlite cannot move table %q to %q with Rename; tables stay in their attached database", o.from, o.to)
 		}
@@ -117,12 +108,11 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 				return nil, fmt.Errorf("migrate: sqlite cannot add auto-increment column %q to existing table %q; declare it in Create, or use Schema.Recreate", c.col.name, op.table)
 			}
 			if c.col.generatedExpr != "" && !c.col.generatedVirtual {
-				// ALTER TABLE ADD COLUMN ... STORED fails on any populated table.
+				// SQLite cannot add stored columns to populated tables.
 				return nil, fmt.Errorf("migrate: sqlite cannot add STORED generated column %q to existing table %q; use VirtualAs, or Schema.Recreate", c.col.name, op.table)
 			}
 			if c.col.useCurrent || c.col.defaultExpr != "" {
-				// Non-constant defaults are rejected by ADD COLUMN on any
-				// populated table.
+				// Populated tables reject non-constant ADD COLUMN defaults.
 				return nil, fmt.Errorf("migrate: sqlite cannot add column %q with a non-constant default to existing table %q; use a literal Default, or Schema.Recreate", c.col.name, op.table)
 			}
 			clause, err := d.columnSQL(op.table, c.col)
@@ -152,7 +142,7 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 		case *renameIndex:
 			return nil, fmt.Errorf("migrate: sqlite cannot rename index %q; drop it and declare a new one", c.from)
 		case *setTableComment:
-			// SQLite has no table comments; the declaration is documentation.
+			// SQLite has no table comments.
 		case *addCheck:
 			return nil, fmt.Errorf("migrate: sqlite cannot add a check constraint to existing table %q; declare it in Create, or use Schema.Recreate", op.table)
 		case *dropCheck:
@@ -183,8 +173,7 @@ func (d sqliteDialect) columnSQL(table string, c *columnDef) (string, error) {
 		if c.kind == kindRaw && !strings.EqualFold(strings.TrimSpace(c.rawType), "INTEGER") {
 			return "", fmt.Errorf("migrate: sqlite allows AUTOINCREMENT only on INTEGER columns; column %q declares %q", c.name, c.rawType)
 		}
-		// INTEGER PRIMARY KEY aliases the rowid; AUTOINCREMENT prevents ids
-		// of deleted rows from being reused.
+		// AUTOINCREMENT prevents rowid reuse.
 		b.WriteString(" PRIMARY KEY AUTOINCREMENT")
 		return b.String(), nil
 	}
@@ -203,9 +192,7 @@ func (d sqliteDialect) columnSQL(table string, c *columnDef) (string, error) {
 	return b.String(), nil
 }
 
-// typeSQL names types for their affinity. SQLite does not enforce lengths or
-// precision, but keeping them in the declaration documents intent and guides
-// tools that read the schema.
+// typeSQL preserves declared lengths and precision for schema readers.
 func (sqliteDialect) typeSQL(c *columnDef) (string, error) {
 	switch c.kind {
 	case kindRaw:
@@ -241,9 +228,7 @@ func (sqliteDialect) typeSQL(c *columnDef) (string, error) {
 	}
 }
 
-// listTriggers returns the CREATE TRIGGER statements attached to the table,
-// read from the sqlite_master of the table's schema. The stored SQL is the
-// original DDL, replayable verbatim as long as the table keeps its name.
+// listTriggers reads replayable DDL from the table schema's sqlite_master.
 func (sqliteDialect) listTriggers(ctx context.Context, db DB, table string) ([]string, error) {
 	master := "sqlite_master"
 	if p := schemaPrefix(table); p != "" {

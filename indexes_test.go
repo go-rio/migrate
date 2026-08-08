@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// compileErr compiles the declaration and returns the first error from
-// validation or dialect compilation, or nil when everything compiles.
 func compileErr(d Dialect, fn func(*Schema)) error {
 	s := &Schema{}
 	fn(s)
@@ -31,8 +29,6 @@ func assertErrContains(t *testing.T, err error, want string) {
 	}
 }
 
-// The partial-index shape this feature exists for: uniqueness among live rows
-// under soft deletion.
 func TestPartialIndex(t *testing.T) {
 	partial := func(s *Schema) {
 		s.Table("users", func(t *Table) {
@@ -91,8 +87,7 @@ func TestExpressionIndex(t *testing.T) {
 	assertSQL(t, compileSchema(t, Postgres, lower), []string{
 		`CREATE UNIQUE INDEX "users_email_lower_unique" ON "users" ((lower(email)))`,
 	})
-	// MySQL requires each functional key part parenthesized; the shared
-	// rendering already satisfies it.
+	// MySQL requires each functional key part to be parenthesized.
 	assertSQL(t, compileSchema(t, MySQL, lower), []string{
 		"CREATE UNIQUE INDEX `users_email_lower_unique` ON `users` ((lower(email)))",
 	})
@@ -179,8 +174,7 @@ func TestIndexOptionsCombine(t *testing.T) {
 	})
 }
 
-// Concurrently must pair with WithoutTransaction on Postgres; the compile gate
-// reports the conflict instead of the server.
+// PostgreSQL concurrent indexes require an untransacted migration.
 func TestConcurrentIndexNeedsWithoutTransaction(t *testing.T) {
 	up := func(s *Schema) {
 		s.Table("events", func(t *Table) { t.Index("user_id").Concurrently() })
@@ -201,7 +195,6 @@ func TestConcurrentIndexNeedsWithoutTransaction(t *testing.T) {
 		t.Fatalf("got %q, want %q", stmts[0].sql, want)
 	}
 
-	// The rollback drops concurrently too, inside the same untransacted run.
 	downs, err := noTx.compile(Postgres, false)
 	if err != nil {
 		t.Fatalf("compile down: %v", err)
@@ -211,8 +204,7 @@ func TestConcurrentIndexNeedsWithoutTransaction(t *testing.T) {
 		t.Fatalf("got %q, want %q", downs[0].sql, wantDown)
 	}
 
-	// MySQL and SQLite build indexes online anyway: the flag renders nothing
-	// and transactional migrations stay legal.
+	// Other dialects ignore Concurrently.
 	txOther := &Migration{name: "m", up: up, useTx: true}
 	stmts, err = txOther.compile(SQLite, true)
 	if err != nil {
@@ -223,7 +215,6 @@ func TestConcurrentIndexNeedsWithoutTransaction(t *testing.T) {
 	}
 }
 
-// The checksum is the compiled SQL, so every new index attribute must move it.
 func TestIndexOptionsMoveChecksum(t *testing.T) {
 	base := &Migration{name: "m", useTx: true, up: func(s *Schema) {
 		s.Table("users", func(t *Table) { t.Unique("email") })

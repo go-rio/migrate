@@ -6,13 +6,9 @@ import (
 	"strings"
 )
 
-// operation is a single step recorded by a migration function. Operations are
-// plain values: the same declaration compiles to dialect SQL, reverses itself
-// for rollbacks, and hashes into the migration checksum.
+// operation is one compilable, reversible migration step.
 type operation interface {
-	// inverse returns the operation that undoes this one, or an error
-	// wrapping ErrIrreversible when the information needed to reverse it
-	// has been discarded (e.g. dropping a table loses its definition).
+	// inverse fails with ErrIrreversible after information has been discarded.
 	inverse() (operation, error)
 }
 
@@ -20,8 +16,7 @@ func irreversible(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", ErrIrreversible, fmt.Sprintf(format, a...))
 }
 
-// colKind enumerates the portable column types. Dialects map each kind to
-// their native type; kindRaw passes a user-supplied type through verbatim.
+// colKind is the portable column type understood by each dialect.
 type colKind int
 
 const (
@@ -84,7 +79,6 @@ type columnDef struct {
 	changeUsing string // Change on Postgres: USING expression converting existing rows
 }
 
-// integerKind reports whether the column type can auto-increment.
 func (c *columnDef) integerKind() bool {
 	switch c.kind {
 	case kindTinyInt, kindSmallInt, kindInt, kindBigInt:
@@ -94,9 +88,7 @@ func (c *columnDef) integerKind() bool {
 	}
 }
 
-// inlinePrimary marks the auto-incrementing primary key, which every dialect
-// renders inline with the column (SQLite requires it, the others read best
-// that way) instead of as a table-level constraint.
+// Auto-incrementing keys render inline because SQLite requires it.
 func (c *columnDef) inlinePrimary() bool {
 	return c.autoIncr && c.primary
 }
@@ -116,8 +108,7 @@ type indexDef struct {
 	concurrently     bool     // Postgres: CREATE INDEX CONCURRENTLY (needs WithoutTransaction)
 }
 
-// suffix names the index kind in the conventional {table}_{columns}_{suffix}
-// name, so dropping by columns can reconstruct what adding by columns produced.
+// suffix participates in reconstructible conventional index names.
 func (i *indexDef) suffix() string {
 	switch {
 	case i.fulltext:
@@ -145,7 +136,6 @@ type foreignDef struct {
 	onUpdate   string
 }
 
-// tableDef is the full declaration collected by a Create call.
 type tableDef struct {
 	name    string
 	columns []*columnDef
@@ -156,9 +146,7 @@ type tableDef struct {
 	comment string
 	errs    []error // declaration mistakes, surfaced at compile time
 
-	// constraintBase, when set, names constraints as if the table were
-	// called this. Recreate compiles its temporary table with the final
-	// name here, so conventional constraint names survive the rename.
+	// Recreate uses the final name while compiling temporary constraints.
 	constraintBase string
 }
 
@@ -169,10 +157,7 @@ func (d *tableDef) constraintTable() string {
 	return d.name
 }
 
-// Conventional constraint names, shared by every dialect so that dropping by
-// columns can reconstruct the name that adding by columns produced. They
-// build on the unqualified table name: constraints already live inside the
-// table's schema.
+// Conventional names use the unqualified table name and can be reconstructed.
 
 func indexName(table string, columns []string, suffix string) string {
 	return baseName(table) + "_" + strings.Join(columns, "_") + "_" + suffix
@@ -199,8 +184,6 @@ func (f *foreignDef) resolvedName(table string) string {
 	}
 	return foreignName(table, f.columns)
 }
-
-// --- top-level operations ---
 
 type createTable struct {
 	def *tableDef
@@ -270,11 +253,7 @@ func (o *goFunc) inverse() (operation, error) {
 	return nil, irreversible("a Go function cannot be reversed; declare an explicit down with WithDown")
 }
 
-// --- alter-table changes ---
-
-// change is a single mutation inside an alterTable operation. Changes reverse
-// individually — possibly into several changes — and alterTable reverses them
-// in reverse order.
+// change is one independently reversible table alteration.
 type change interface {
 	inverseChange(table string) ([]change, error)
 }
@@ -287,9 +266,7 @@ func (c *addColumn) inverseChange(table string) ([]change, error) {
 	if c.col.change {
 		return nil, irreversible("changing column %q of table %q discards its previous definition", c.col.name, table)
 	}
-	// Indexes implied by Unique/Index modifiers drop before the column does:
-	// Postgres and MySQL would cascade them away, but SQLite refuses to drop
-	// a column that an index still references.
+	// SQLite requires dependent indexes to be dropped first.
 	var out []change
 	for _, idx := range inlineIndexes([]*columnDef{c.col}) {
 		out = append(out, &dropIndex{name: idx.resolvedName(table)})
@@ -318,8 +295,7 @@ type addIndex struct {
 }
 
 func (c *addIndex) inverseChange(table string) ([]change, error) {
-	// A concurrently built index also drops concurrently: the rollback runs
-	// in the same WithoutTransaction migration the build required.
+	// The rollback keeps the original migration's concurrent mode.
 	return []change{&dropIndex{name: c.idx.resolvedName(table), concurrently: c.idx.concurrently}}, nil
 }
 

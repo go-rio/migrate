@@ -57,6 +57,8 @@ if err := m.Up(ctx); err != nil {
 
 ## Installation
 
+Requires Go 1.27 or newer.
+
 ```bash
 go get github.com/go-rio/migrate
 ```
@@ -68,6 +70,31 @@ go get github.com/go-rio/migrate
 > lock namespace was renamed with the module, so avoid running migrations
 > concurrently from pre-v0.5.0 and post-v0.5.0 binaries during a rolling
 > upgrade.
+
+### Using the rio connection
+
+`migrate` stays independent of the ORM and owns no connection pool. Pass the
+underlying `*sql.DB` from an injected `*rio.DB`:
+
+```go
+rdb, err := riopostgres.Open(dsn)
+if err != nil {
+	return err
+}
+defer rdb.Close()
+
+m, err := migrate.New(rdb.Unwrap(), migrate.Postgres)
+if err != nil {
+	return err
+}
+return m.Up(ctx)
+```
+
+The explicit `Unwrap` matters: a migration takes a dedicated `*sql.Conn` so
+its advisory lock, DDL, and bookkeeping stay on the same database session.
+Postgres's native rio channel also supplies a `database/sql` view from
+`Unwrap` for pool-agnostic operations such as migrations. `migrate.New` does
+not take ownership of the pool and never closes it.
 
 ## Writing migrations
 
@@ -109,6 +136,26 @@ s.Create("articles", func(t *migrate.Table) {
 	t.Column("tags", "text[]")          // any dialect type, verbatim
 })
 ```
+
+Go 1.27 generic methods let declarations reuse application scalar types
+without conversions:
+
+```go
+type State string
+
+const (
+	StateDraft State = "draft"
+	StateLive  State = "live"
+)
+
+t.Enum("state", StateDraft, StateLive).Default(StateDraft)
+```
+
+`Default` accepts defined boolean, string, integer, unsigned integer, and
+floating-point types and renders them as escaped SQL literals. A nullable
+column needs no explicit `DEFAULT NULL`; use `Nullable()` without `Default`.
+Database functions and other SQL expressions stay explicit through
+`DefaultExpr`.
 
 Columns are `NOT NULL` unless declared `.Nullable()`. Modifiers chain:
 

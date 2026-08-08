@@ -5,10 +5,7 @@ import (
 	"testing"
 )
 
-// FuzzLiteral checks that string literals stay well-formed for any input: a
-// quoted form whose interior contains no unescaped quote and, in
-// backslash-escaping mode, no unescaped backslash. Broken escaping here would
-// be a SQL injection through Default values.
+// FuzzLiteral checks that arbitrary default values remain quoted SQL literals.
 func FuzzLiteral(f *testing.F) {
 	f.Add("plain")
 	f.Add("it's")
@@ -38,8 +35,7 @@ func FuzzLiteral(f *testing.F) {
 	})
 }
 
-// FuzzQuoterIdent checks identifier quoting never produces a string that
-// escapes its quotes.
+// FuzzQuoterIdent checks that arbitrary identifiers stay within their quotes.
 func FuzzQuoterIdent(f *testing.F) {
 	f.Add("users")
 	f.Add(`we"ird`)
@@ -59,7 +55,7 @@ func FuzzQuoterIdent(f *testing.F) {
 	})
 }
 
-// FuzzGuessParentTable just must not panic or return junk with separators.
+// FuzzGuessParentTable rejects malformed inferred table names.
 func FuzzGuessParentTable(f *testing.F) {
 	f.Add("user_id")
 	f.Add("_id")

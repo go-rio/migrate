@@ -7,8 +7,8 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
-        go: [ "oldstable", "stable" ]
         platform: [ ubuntu-latest, macos-latest, windows-latest ]
     runs-on: ${{ matrix.platform }}
     steps:
@@ -22,10 +22,10 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Run tests
-        run: go test -race -timeout 10m ./...
+        run: go test -race -shuffle=on -timeout 10m ./...
       - name: Run SQLite integration tests
         working-directory: integration
-        run: go test -race -timeout 10m ./...
+        run: go test -race -shuffle=on -count=1 -timeout 10m ./...
   integration:
     runs-on: ubuntu-latest
     services:
@@ -63,7 +63,7 @@ jobs:
           go-version: 'stable'
       - name: Run integration tests against Postgres and MySQL
         working-directory: integration
-        run: go test -race -timeout 10m ./...
+        run: go test -race -shuffle=on -count=1 -timeout 10m ./...
         env:
           MIGRATE_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/migrate_test?sslmode=disable
           MIGRATE_MYSQL_DSN: root:root@tcp(localhost:3306)/migrate_test

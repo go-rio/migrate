@@ -32,10 +32,7 @@ func TestRecreateCompilesMoveAndCopy(t *testing.T) {
 	assertSQL(t, got, want)
 }
 
-// Audit H5: DROP TABLE takes the table's triggers with it, so the sequence
-// must capture their DDL before the drop and replay it once the rename
-// restores the original name — the order the SQLite twelve-step ALTER TABLE
-// procedure prescribes.
+// Recreate must capture triggers before DROP and replay them after rename.
 func TestRecreateReplaysCapturedTriggers(t *testing.T) {
 	for name, tc := range map[string]struct {
 		d       Dialect
@@ -61,8 +58,6 @@ func TestRecreateReplaysCapturedTriggers(t *testing.T) {
 				`RENAME TO "users"`,
 				"CREATE TRIGGER users_audit", // replay lands after the rename
 			})
-			// The bookkeeping row is written in the same transaction; where
-			// in it is dialect business (SQLite records first, see LB11).
 			if len(f.loggedContaining(`INSERT INTO "schema_migrations"`)) != 1 {
 				t.Error("the migration must be recorded")
 			}
@@ -80,9 +75,7 @@ func TestRecreateConstraintNamesUseFinalTable(t *testing.T) {
 	create := got[0]
 	for _, frag := range []string{
 		`CREATE TABLE "orders__migrate_new"`,
-		// The PK stays unnamed here: a named one would create a backing index
-		// colliding with the live table's orders_pkey. It is renamed to the
-		// conventional name after the swap.
+		// Naming the temporary primary key would collide with the live one.
 		`PRIMARY KEY ("code")`,
 		`CONSTRAINT "orders_state_check" CHECK ("state" IN (`, // not orders__migrate_new_state_check
 	} {
@@ -115,7 +108,7 @@ func TestRecreateIdentitySequenceAdvances(t *testing.T) {
 		t.Errorf("the identity sequence must advance past copied rows:\n got: %s\nwant: %s", got[len(got)-1], want)
 	}
 
-	// A skipped-copy identity column keeps its fresh sequence: no setval.
+	// A skipped identity column keeps its fresh sequence.
 	got = compileSchema(t, Postgres, func(s *Schema) {
 		s.Recreate("users", func(t *Table) {
 			t.ID().SkipCopy()
@@ -127,9 +120,7 @@ func TestRecreateIdentitySequenceAdvances(t *testing.T) {
 	}
 }
 
-// Codex adversarial review: MySQL's implicit DDL commits leave a crash window
-// between the DROP and the RENAME with the live table gone; native ALTER
-// covers every Recreate use case there, so compiling is refused outright.
+// MySQL refuses Recreate because implicit DDL commits make the swap unsafe.
 func TestMySQLRefusesRecreate(t *testing.T) {
 	s := &Schema{}
 	s.Recreate("t", func(t *Table) { t.ID() })
@@ -175,9 +166,7 @@ func TestRecreateSafetyFinding(t *testing.T) {
 	}
 }
 
-// Codex round 2: WithoutTransaction reopened the crash window on a Recreate
-// that the MySQL gate had closed — statement-by-statement execution can lose
-// the live table between the DROP and the rename.
+// Recreate requires a transaction to keep the table swap atomic.
 func TestRecreateRequiresTransaction(t *testing.T) {
 	f := newFakeDB()
 	c := NewCollection()
