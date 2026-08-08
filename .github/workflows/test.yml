@@ -9,7 +9,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: [ "oldstable", "stable" ]
+        # oldstable is Go 1.26, below this module's go directive. Restore it
+        # once 1.27.0 ships and oldstable reaches 1.27.
+        go: [ "stable" ]
         platform: [ ubuntu-latest, macos-latest, windows-latest ]
     runs-on: ${{ matrix.platform }}
     steps:
