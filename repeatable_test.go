@@ -151,6 +151,22 @@ func TestResetForgetsRepeatableRecords(t *testing.T) {
 	}
 }
 
+func TestResetForgetsRepeatableRecordsWithoutVersionedMigrations(t *testing.T) {
+	f := newFakeDB()
+	c := viewCollection("active")
+	f.setRecords(repeatableRecord(t, c, "active_users_view"))
+	m := testMigrator(t, f, Postgres, c)
+	if err := m.Reset(context.Background()); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if len(f.loggedContaining("DELETE FROM \"schema_migrations\" WHERE batch")) != 1 {
+		t.Error("Reset should forget repeatable records even when no versioned migration is applied")
+	}
+	if len(f.loggedContaining(`DROP TABLE "users"`)) != 0 {
+		t.Error("Reset must not reverse an unapplied versioned migration")
+	}
+}
+
 func TestRepeatableStatusAndPlan(t *testing.T) {
 	f := newFakeDB()
 	old := viewCollection("active")

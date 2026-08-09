@@ -56,6 +56,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.7-alpine
+        env:
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: clickhouse
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "clickhouse-client --user default --password clickhouse --query 'SELECT 1'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -64,12 +77,13 @@ jobs:
         with:
           cache: true
           go-version: 'stable'
-      - name: Run integration tests against Postgres and MySQL
+      - name: Run integration tests against Postgres, MySQL, and ClickHouse
         working-directory: integration
         run: go test -race -shuffle=on -count=1 -timeout 10m ./...
         env:
           MIGRATE_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/migrate_test?sslmode=disable
           MIGRATE_MYSQL_DSN: root:root@tcp(localhost:3306)/migrate_test
+          MIGRATE_CLICKHOUSE_DSN: clickhouse://default:clickhouse@localhost:9000/default?dial_timeout=10s
   coverage:
     runs-on: ubuntu-latest
     steps:

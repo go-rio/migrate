@@ -15,6 +15,10 @@ var (
 	ErrIrreversible = errors.New("migrate: migration cannot be automatically reversed")
 	// ErrLockTimeout marks a timed-out advisory lock acquisition.
 	ErrLockTimeout = errors.New("migrate: timed out waiting for the migration lock")
+	// ErrLockUnsupported indicates that the dialect has no built-in migration
+	// lock. Callers may use WithoutLock only after serializing deployments
+	// externally.
+	ErrLockUnsupported = errors.New("migrate: migration lock unsupported")
 	// ErrChecksumMismatch marks an edited applied migration.
 	ErrChecksumMismatch = errors.New("migrate: checksum mismatch")
 )
@@ -181,7 +185,7 @@ func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !m.useTx {
+	if !m.useTx && d.transactionMode() != transactionModeNone {
 		for _, op := range ops {
 			if _, ok := op.(*recreateTable); ok {
 				// A failure between DROP and rename would lose the live table.

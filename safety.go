@@ -49,11 +49,19 @@ func analyzeSafety(dialect string, ops []operation) []string {
 				switch c := ch.(type) {
 				case *addColumn:
 					if c.col.change {
+						if dialect == "clickhouse" {
+							warn("changing column %q of table %q may rewrite a large amount of ClickHouse data; verify the conversion and plan for mutation cost", c.col.name, o.table)
+							continue
+						}
 						warn("changing column %q of table %q rewrites the table under lock on most engines, and a narrowing type or a new NOT NULL fails on rows that no longer fit; backfill first and plan for the rewrite time", c.col.name, o.table)
 						continue
 					}
 					// Generated columns fill existing rows themselves.
 					if !c.col.nullable && !c.col.hasDefault && !c.col.useCurrent && !c.col.autoIncr && c.col.generatedExpr == "" {
+						if dialect == "clickhouse" {
+							warn("adding non-Nullable column %q to existing ClickHouse table %q makes old rows read the type's zero value; declare an explicit Default when that is not the intended value", c.col.name, o.table)
+							continue
+						}
 						warn("adding NOT NULL column %q to existing table %q fails when rows exist; add a Default, or make it Nullable and backfill", c.col.name, o.table)
 					}
 				case *dropColumn:
@@ -73,6 +81,8 @@ func analyzeSafety(dialect string, ops []operation) []string {
 				case *addCheck:
 					if dialect == "postgres" {
 						warn("adding check constraint %q validates every row of %q under lock; on a large table add it NOT VALID via Exec, then VALIDATE CONSTRAINT separately", c.chk.name, o.table)
+					} else if dialect == "clickhouse" {
+						warn("adding check constraint %q to ClickHouse table %q only constrains future inserts and does not validate historical rows", c.chk.name, o.table)
 					}
 				}
 			}

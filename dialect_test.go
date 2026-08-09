@@ -476,6 +476,12 @@ func TestIdentifierQuoting(t *testing.T) {
 	if got := myQ.ident("we`ird"); got != "`we``ird`" {
 		t.Errorf("mysql ident = %s", got)
 	}
+	if got, want := clickHouseQ.ident("back\\slash`tick"), "`back\\\\slash\\"+"`tick`"; got != want {
+		t.Errorf("clickhouse ident = %q, want %q", got, want)
+	}
+	if got, want := clickHouseQ.table("db\\name.table`name"), "`db\\\\name`.`table\\"+"`name`"; got != want {
+		t.Errorf("clickhouse table = %q, want %q", got, want)
+	}
 }
 
 // Invalid SQLite ADD COLUMN forms must fail during compilation.

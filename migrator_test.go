@@ -289,6 +289,46 @@ func TestRollbackIrreversibleFails(t *testing.T) {
 	}
 }
 
+func TestRollbackPrecompilesAllTargetsBeforeChangingTheDatabase(t *testing.T) {
+	f := newFakeDB()
+	c := NewCollection()
+	c.Add("001_irreversible", func(s *Schema) { s.Exec("UPDATE audit SET value = 1") })
+	c.Add("002_posts", func(s *Schema) { s.Create("posts", func(t *Table) { t.ID() }) })
+	f.setRecords(
+		appliedRecord(t, c, Postgres, "001_irreversible", 1),
+		appliedRecord(t, c, Postgres, "002_posts", 1),
+	)
+	err := testMigrator(t, f, Postgres, c).Reset(context.Background())
+	if !errors.Is(err, ErrIrreversible) {
+		t.Fatalf("Reset error = %v, want ErrIrreversible", err)
+	}
+	if len(f.loggedContaining(`DROP TABLE "posts"`)) != 0 {
+		t.Fatal("no rollback may start before every target compiles")
+	}
+}
+
+func TestRollbackFailureReportsCompletedMigrations(t *testing.T) {
+	f := newFakeDB()
+	c := twoTables()
+	f.setRecords(
+		appliedRecord(t, c, Postgres, "001_users", 1),
+		appliedRecord(t, c, Postgres, "002_posts", 1),
+	)
+	f.fail(`DROP TABLE "users"`, errors.New("blocked drop"))
+	err := testMigrator(t, f, Postgres, c).Reset(context.Background())
+	if err == nil {
+		t.Fatal("Reset should fail")
+	}
+	for _, fragment := range []string{"1/2", "002_posts", "already rolled back", "not automatically restored", "blocked drop"} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Errorf("Reset error should contain %q, got: %v", fragment, err)
+		}
+	}
+	if len(f.loggedContaining(`DROP TABLE "posts"`)) != 1 {
+		t.Fatal("the first target should have been rolled back")
+	}
+}
+
 func TestMySQLFailureExplainsImplicitCommit(t *testing.T) {
 	f := newFakeDB()
 	c := NewCollection()
@@ -622,6 +662,22 @@ func TestFreshDropsEverythingThenMigrates(t *testing.T) {
 		`CREATE TABLE "posts"`,
 		"INSERT INTO",
 	})
+}
+
+func TestFreshFailureReportsDroppedAndRemainingTables(t *testing.T) {
+	f := newFakeDB()
+	f.tables = []string{"already_gone", "blocked"}
+	f.fail(`"blocked"`, errors.New("dependency remains"))
+	m := testMigrator(t, f, Postgres, NewCollection())
+	err := m.Fresh(context.Background())
+	if err == nil {
+		t.Fatal("Fresh should fail")
+	}
+	for _, fragment := range []string{"already_gone", "schema_migrations", "already dropped", "blocked", "remaining tables", "dependency remains"} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Errorf("Fresh error should contain %q, got: %v", fragment, err)
+		}
+	}
 }
 
 // Fresh must fail if stale migration records survive the table drops.

@@ -8,9 +8,10 @@ import (
 // Table builds a new table or a set of alterations. Declaration errors are
 // collected and returned when the migration compiles.
 type Table struct {
-	table  string
-	create *tableDef   // set inside Schema.Create
-	alter  *alterTable // set inside Schema.Table
+	table                 string
+	create                *tableDef   // set inside Schema.Create or Schema.Recreate
+	alter                 *alterTable // set inside Schema.Table
+	allowClickHouseEngine bool
 }
 
 func (t *Table) errf(format string, a ...any) {
@@ -317,6 +318,38 @@ func (t *Table) Comment(comment string) {
 		return
 	}
 	t.alter.changes = append(t.alter.changes, &setTableComment{comment: comment})
+}
+
+// ClickHouseEngine sets the complete ClickHouse storage fragment rendered
+// after ENGINE =. It may include engine parameters, PARTITION BY, ORDER BY,
+// PRIMARY KEY, SAMPLE BY, TTL, and storage SETTINGS. It is only valid inside
+// Schema.Create; omit ENGINE =, table COMMENT, and a trailing semicolon.
+// Other dialects ignore it.
+func (t *Table) ClickHouseEngine(clause string) {
+	if !t.allowClickHouseEngine {
+		t.errf("ClickHouseEngine is only valid inside Schema.Create (table %q)", t.table)
+		return
+	}
+	if t.create.clickHouseEngineSet {
+		t.errf("ClickHouseEngine is declared more than once for table %q", t.table)
+		return
+	}
+	t.create.clickHouseEngineSet = true
+	trimmed := strings.TrimSpace(clause)
+	if trimmed == "" {
+		t.errf("ClickHouseEngine for table %q must not be empty", t.table)
+		return
+	}
+	upper := strings.ToUpper(trimmed)
+	if strings.HasPrefix(upper, "ENGINE=") || strings.HasPrefix(upper, "ENGINE =") {
+		t.errf("ClickHouseEngine for table %q must omit ENGINE =", t.table)
+		return
+	}
+	if strings.HasSuffix(trimmed, ";") {
+		t.errf("ClickHouseEngine for table %q must omit the trailing semicolon", t.table)
+		return
+	}
+	t.create.clickHouseEngine = clause
 }
 
 // RenameIndex renames an index. It reverses to the opposite rename. SQLite

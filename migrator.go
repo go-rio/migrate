@@ -51,7 +51,8 @@ type record struct {
 }
 
 // Up applies pending versioned migrations as one batch, then runs changed
-// repeatables. Each migration uses its own transaction unless opted out.
+// repeatables. Each migration uses its own transaction when the dialect
+// supports one and the migration has not opted out.
 func (m *Migrator) Up(ctx context.Context) error {
 	return m.locked(ctx, func(conn *sql.Conn) error {
 		recs, err := m.loadState(ctx, conn)
@@ -171,24 +172,50 @@ func (m *Migrator) rollback(ctx context.Context, spec rollbackSpec) error {
 			return err
 		}
 		if len(targets) == 0 {
-			m.cfg.logger.Info("migrate: nothing to roll back")
-			return nil
+			if !spec.reset {
+				m.cfg.logger.Info("migrate: nothing to roll back")
+				return nil
+			}
 		}
-		for _, mig := range targets {
-			if err := m.runOne(ctx, conn, mig, false, m.deleteRecord(mig)); err != nil {
+		runs := make([]preparedMigration, len(targets))
+		for i, mig := range targets {
+			run, err := m.prepareOne(mig, false, m.deleteRecord(mig))
+			if err != nil {
 				return err
+			}
+			runs[i] = run
+		}
+		for i, run := range runs {
+			if err := m.runPrepared(ctx, conn, run); err != nil {
+				return rollbackProgressError(err, spec, runs[:i], len(runs))
 			}
 		}
 		if spec.reset {
 			// Repeatables have no down; forgetting them makes the next Up rerun all.
-			query := fmt.Sprintf("DELETE FROM %s WHERE batch = %s",
-				m.d.quoteIdent(m.cfg.table), m.d.placeholder(1))
+			query := m.d.recordDeleteSQL(m.cfg.table, "batch")
 			if _, err := conn.ExecContext(ctx, query, repeatableBatch); err != nil {
-				return fmt.Errorf("migrate: forget repeatable records: %w", err)
+				err = fmt.Errorf("migrate: forget repeatable records: %w", err)
+				return rollbackProgressError(err, spec, runs, len(runs))
 			}
 		}
 		return nil
 	})
+}
+
+func rollbackProgressError(err error, spec rollbackSpec, completed []preparedMigration, total int) error {
+	if len(completed) == 0 {
+		return err
+	}
+	names := make([]string, len(completed))
+	for i, run := range completed {
+		names[i] = run.mig.name
+	}
+	action := "rollback"
+	if spec.reset {
+		action = "reset"
+	}
+	return fmt.Errorf("migrate: %s stopped after %d/%d versioned migrations; %q were already rolled back and their migration records deleted, and those changes were not automatically restored: %w",
+		action, len(completed), total, names, err)
 }
 
 func (m *Migrator) rollbackTargets(ctx context.Context, conn *sql.Conn, spec rollbackSpec) ([]*Migration, error) {
@@ -235,14 +262,17 @@ func (m *Migrator) rollbackTargets(ctx context.Context, conn *sql.Conn, spec rol
 	return targets, nil
 }
 
-func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, up bool, bookkeep statement) error {
-	verb, verbed := "apply", "applied"
-	if !up {
-		verb, verbed = "roll back", "rolled back"
-	}
+type preparedMigration struct {
+	mig     *Migration
+	up      bool
+	stmts   []statement
+	arbiter int
+}
+
+func (m *Migrator) prepareOne(mig *Migration, up bool, bookkeep statement) (preparedMigration, error) {
 	stmts, err := mig.compile(m.d, up)
 	if err != nil {
-		return err
+		return preparedMigration{}, err
 	}
 	arbiter := -1
 	if up && mig.useTx && m.d.name() == "sqlite" {
@@ -253,17 +283,39 @@ func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, u
 	} else {
 		stmts = append(stmts, bookkeep)
 	}
+	return preparedMigration{mig: mig, up: up, stmts: stmts, arbiter: arbiter}, nil
+}
+
+func (m *Migrator) runOne(ctx context.Context, conn *sql.Conn, mig *Migration, up bool, bookkeep statement) error {
+	run, err := m.prepareOne(mig, up, bookkeep)
+	if err != nil {
+		return err
+	}
+	return m.runPrepared(ctx, conn, run)
+}
+
+func (m *Migrator) runPrepared(ctx context.Context, conn *sql.Conn, run preparedMigration) error {
+	verb, verbed := "apply", "applied"
+	if !run.up {
+		verb, verbed = "roll back", "rolled back"
+	}
 
 	start := time.Now()
-	if mig.useTx {
-		err = m.runInTx(ctx, conn, stmts, arbiter)
-	} else {
-		_, err = runStatements(ctx, conn, stmts)
+	var err error
+	switch {
+	case run.mig.useTx && m.d.transactionMode() != transactionModeNone:
+		err = m.runInTx(ctx, conn, run.stmts, run.arbiter)
+	default:
+		failed := 0
+		failed, err = runStatements(ctx, conn, run.stmts)
+		if err != nil && m.d.transactionMode() == transactionModeNone {
+			err = fmt.Errorf("%w (%s)", err, nonTransactionalNote(m.d.name(), failed, len(run.stmts)))
+		}
 	}
 	if err != nil {
-		return fmt.Errorf("migrate: %s %q: %w", verb, mig.name, err)
+		return fmt.Errorf("migrate: %s %q: %w", verb, run.mig.name, err)
 	}
-	m.cfg.logger.Info("migrate: "+verbed, "migration", mig.name, "repeatable", mig.repeatable,
+	m.cfg.logger.Info("migrate: "+verbed, "migration", run.mig.name, "repeatable", run.mig.repeatable,
 		"duration", time.Since(start).Round(time.Millisecond))
 	return nil
 }
@@ -281,7 +333,7 @@ func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statemen
 		switch {
 		case failed == arbiter && strings.Contains(err.Error(), "UNIQUE constraint failed"):
 			err = fmt.Errorf("%w (another migrator applied this migration concurrently; this transaction rolled back before touching the schema — rerun to verify nothing is pending)", err)
-		case !m.d.transactionalDDL():
+		case m.d.transactionMode() == transactionModeDML:
 			err = fmt.Errorf("%w (%s)", err, implicitCommitNote(m.d.name(), stmts, failed))
 		}
 		return err
@@ -290,6 +342,25 @@ func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statemen
 		return fmt.Errorf("commit transaction: %w", err)
 	}
 	return nil
+}
+
+// nonTransactionalNote describes the successfully executed prefix when a
+// dialect cannot put a migration inside one transaction. failed is the
+// zero-based failing statement.
+func nonTransactionalNote(dialect string, failed, total int) string {
+	history := "the final migration-record statement was not reached"
+	if failed == total-1 {
+		history = "the final migration-record statement did not report success"
+	}
+	if failed == 0 {
+		return fmt.Sprintf("%s has no multi-statement migration transaction; no earlier statement completed and %s; inspect the failed statement and migration records before retrying", dialect, history)
+	}
+	span := fmt.Sprintf("statements 1-%d", failed)
+	if failed == 1 {
+		span = "statement 1"
+	}
+	return fmt.Sprintf("%s has no multi-statement migration transaction: %s may already be effective, the failed statement did not report success, and %s; reconcile the actual schema and migration records before retrying or baselining",
+		dialect, span, history)
 }
 
 // implicitCommitNote describes the prefix persisted by MySQL's implicit DDL
@@ -348,8 +419,7 @@ func (m *Migrator) insertRecord(mig *Migration, batch int) (statement, error) {
 		return statement{}, err
 	}
 	return statement{
-		sql: fmt.Sprintf("INSERT INTO %s (version, batch, checksum, applied_at) VALUES (%s, %s, %s, %s)",
-			m.d.quoteIdent(m.cfg.table), m.d.placeholder(1), m.d.placeholder(2), m.d.placeholder(3), m.d.placeholder(4)),
+		sql:  m.d.recordInsertSQL(m.cfg.table),
 		args: []any{mig.name, batch, sum, m.now()},
 	}, nil
 }
@@ -360,15 +430,14 @@ func (m *Migrator) updateRecord(mig *Migration) (statement, error) {
 		return statement{}, err
 	}
 	return statement{
-		sql: fmt.Sprintf("UPDATE %s SET checksum = %s, applied_at = %s WHERE version = %s",
-			m.d.quoteIdent(m.cfg.table), m.d.placeholder(1), m.d.placeholder(2), m.d.placeholder(3)),
+		sql:  m.d.recordUpdateSQL(m.cfg.table),
 		args: []any{sum, m.now(), mig.name},
 	}, nil
 }
 
 func (m *Migrator) deleteRecord(mig *Migration) statement {
 	return statement{
-		sql:  fmt.Sprintf("DELETE FROM %s WHERE version = %s", m.d.quoteIdent(m.cfg.table), m.d.placeholder(1)),
+		sql:  m.d.recordDeleteSQL(m.cfg.table, "version"),
 		args: []any{mig.name},
 	}
 }
@@ -388,11 +457,16 @@ func (m *Migrator) loadState(ctx context.Context, db DB) ([]record, error) {
 	}
 	defer func() { _ = rows.Close() }()
 	var recs []record
+	seen := make(map[string]struct{})
 	for rows.Next() {
 		var r record
 		if err := rows.Scan(&r.version, &r.batch, &r.checksum, &r.appliedAt); err != nil {
 			return nil, fmt.Errorf("migrate: read records table: %w", err)
 		}
+		if _, duplicate := seen[r.version]; duplicate {
+			return nil, fmt.Errorf("migrate: records table contains duplicate version %q; the external migration serialization guarantee was violated, so reconcile the records before continuing", r.version)
+		}
+		seen[r.version] = struct{}{}
 		recs = append(recs, r)
 	}
 	if err := rows.Err(); err != nil {

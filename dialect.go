@@ -13,19 +13,36 @@ import (
 )
 
 // Dialect compiles and executes migrations for one database engine.
-// Built-in values are Postgres, MySQL, and SQLite.
+// Built-in values are Postgres, MySQL, SQLite, and ClickHouse.
 type Dialect interface {
 	name() string
 	compile(op operation) ([]statement, error)
 	ensureTableSQL(table string) string
 	quoteIdent(name string) string
 	placeholder(n int) string
-	transactionalDDL() bool
+	transactionMode() transactionMode
+	recordInsertSQL(table string) string
+	recordUpdateSQL(table string) string
+	recordDeleteSQL(table, column string) string
+	recordRepairSQL(table string) string
 	lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) error
 	unlock(ctx context.Context, conn *sql.Conn, table string) error
 	listTablesSQL() string
 	freshDropSQL(table string) string
 }
+
+// transactionMode describes the guarantees available to one migration. It is
+// deliberately more precise than a transactional-DDL boolean: MySQL protects
+// plain DML but commits DDL implicitly, while ClickHouse offers no
+// multi-statement migration transaction at all.
+type transactionMode uint8
+
+const (
+	transactionModeInvalid transactionMode = iota
+	transactionModeFull
+	transactionModeDML
+	transactionModeNone
+)
 
 // statement is either SQL or an opaque Go migration function.
 type statement struct {
@@ -42,11 +59,40 @@ func sqlStatement(format string, a ...any) statement {
 	return statement{sql: fmt.Sprintf(format, a...)}
 }
 
-type quoter byte
+func standardRecordInsertSQL(d Dialect, table string) string {
+	return fmt.Sprintf("INSERT INTO %s (version, batch, checksum, applied_at) VALUES (%s, %s, %s, %s)",
+		d.quoteIdent(table), d.placeholder(1), d.placeholder(2), d.placeholder(3), d.placeholder(4))
+}
+
+func standardRecordUpdateSQL(d Dialect, table string) string {
+	return fmt.Sprintf("UPDATE %s SET checksum = %s, applied_at = %s WHERE version = %s",
+		d.quoteIdent(table), d.placeholder(1), d.placeholder(2), d.placeholder(3))
+}
+
+func standardRecordDeleteSQL(d Dialect, table, column string) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE %s = %s",
+		d.quoteIdent(table), column, d.placeholder(1))
+}
+
+func standardRecordRepairSQL(d Dialect, table string) string {
+	return fmt.Sprintf("UPDATE %s SET checksum = %s WHERE version = %s",
+		d.quoteIdent(table), d.placeholder(1), d.placeholder(2))
+}
+
+type quoter struct {
+	delimiter       byte
+	escapeBackslash bool
+}
 
 func (q quoter) ident(name string) string {
-	c := string(q)
-	return c + strings.ReplaceAll(name, c, c+c) + c
+	c := string(q.delimiter)
+	if q.escapeBackslash {
+		name = strings.ReplaceAll(name, `\`, `\\`)
+		name = strings.ReplaceAll(name, c, `\`+c)
+	} else {
+		name = strings.ReplaceAll(name, c, c+c)
+	}
+	return c + name + c
 }
 
 func (q quoter) idents(names []string) string {

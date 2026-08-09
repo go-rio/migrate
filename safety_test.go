@@ -26,6 +26,11 @@ func TestAnalyzeSafetyFindings(t *testing.T) {
 			func(s *Schema) { s.Table("t", func(t *Table) { t.String("c") }) },
 			"fails when rows exist",
 		},
+		"clickhouse non-null without default": {
+			"clickhouse",
+			func(s *Schema) { s.Table("t", func(t *Table) { t.String("c") }) },
+			"type's zero value",
+		},
 		"drop column": {
 			"postgres",
 			func(s *Schema) { s.Table("t", func(t *Table) { t.DropColumn("c") }) },
@@ -46,6 +51,11 @@ func TestAnalyzeSafetyFindings(t *testing.T) {
 			func(s *Schema) { s.Table("t", func(t *Table) { t.String("c", 50).Change() }) },
 			"rewrites the table",
 		},
+		"changed column on clickhouse": {
+			"clickhouse",
+			func(s *Schema) { s.Table("t", func(t *Table) { t.String("c", 50).Change() }) },
+			"ClickHouse data",
+		},
 		"foreign key on postgres": {
 			"postgres",
 			func(s *Schema) { s.Table("t", func(t *Table) { t.Foreign("c").References("p") }) },
@@ -55,6 +65,11 @@ func TestAnalyzeSafetyFindings(t *testing.T) {
 			"postgres",
 			func(s *Schema) { s.Table("t", func(t *Table) { t.Primary("a", "b") }) },
 			"rewrites the table",
+		},
+		"check on clickhouse": {
+			"clickhouse",
+			func(s *Schema) { s.Table("t", func(t *Table) { t.Check("positive", "value > 0") }) },
+			"does not validate historical rows",
 		},
 		"create table is safe": {
 			"postgres",

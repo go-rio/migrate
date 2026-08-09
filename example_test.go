@@ -110,3 +110,38 @@ func ExampleCollection_SQL() {
 	// );
 	// CREATE UNIQUE INDEX "teams_name_unique" ON "teams" ("name");
 }
+
+// ClickHouse tables require an explicit storage engine and externally
+// serialized migration execution.
+func Example_clickHouse() {
+	c := migrate.NewCollection()
+	c.Add("20260809100000_create_events", func(s *migrate.Schema) {
+		s.Create("events", func(t *migrate.Table) {
+			t.UUID("id")
+			t.String("tenant_id")
+			t.TimestampTz("occurred_at")
+			t.JSON("payload")
+			t.ClickHouseEngine(
+				"MergeTree() PARTITION BY toYYYYMM(occurred_at) " +
+					"ORDER BY (tenant_id, occurred_at)",
+			)
+		})
+	})
+
+	db, err := sql.Open("clickhouse", "clickhouse://localhost:9000/default")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	m, err := migrate.New(db, migrate.ClickHouse,
+		migrate.WithCollection(c),
+		migrate.WithoutLock(), // the deploy system must serialize this call
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := m.Up(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}

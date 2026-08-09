@@ -17,6 +17,7 @@ type DB interface {
 var (
 	_ DB = (*sql.Tx)(nil)
 	_ DB = (*sql.DB)(nil)
+	_ DB = (*sql.Conn)(nil)
 )
 
 // Schema records migration operations without touching the database.
@@ -45,7 +46,7 @@ func (s *Schema) requireTable(method, table string) {
 func (s *Schema) Create(table string, fn func(*Table)) {
 	s.requireTable("Create", table)
 	def := &tableDef{name: table}
-	t := &Table{table: table, create: def}
+	t := &Table{table: table, create: def, allowClickHouseEngine: true}
 	if fn != nil {
 		fn(t)
 	}
@@ -71,7 +72,7 @@ func (s *Schema) Table(table string, fn func(*Table)) {
 
 // Recreate rebuilds a table while preserving rows and triggers. Columns copy
 // by name unless CopyFrom or SkipCopy says otherwise. PostgreSQL and SQLite
-// run the rebuild transactionally; MySQL rejects it.
+// run the rebuild transactionally; MySQL and ClickHouse reject it.
 //
 // Recreate is irreversible without WithDown. PostgreSQL also rejects rebuilds
 // blocked by dependent foreign keys or views.
@@ -118,7 +119,8 @@ func (s *Schema) Exec(query string, args ...any) {
 }
 
 // Run records an opaque Go data migration. It runs in the migration
-// transaction when present, is excluded from checksums, and is irreversible.
+// transaction when the dialect provides one, or on the dedicated connection
+// otherwise. It is excluded from checksums and is irreversible.
 func (s *Schema) Run(fn func(ctx context.Context, db DB) error) {
 	if fn == nil {
 		s.errf("Run declares a nil function")

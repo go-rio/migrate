@@ -41,15 +41,24 @@ func FuzzQuoterIdent(f *testing.F) {
 	f.Add(`we"ird`)
 	f.Add("back`tick")
 	f.Fuzz(func(t *testing.T, s string) {
-		for _, q := range []quoter{pgQ, myQ} {
+		for _, q := range []quoter{pgQ, myQ, clickHouseQ} {
 			id := q.ident(s)
-			c := string(q)
+			c := string(q.delimiter)
 			if !strings.HasPrefix(id, c) || !strings.HasSuffix(id, c) {
 				t.Fatalf("ident(%q) = %s is not wrapped in %s", s, id, c)
 			}
 			inner := id[1 : len(id)-1]
-			if strings.Contains(strings.ReplaceAll(inner, c+c, ""), c) {
+			if q.escapeBackslash {
+				inner = strings.ReplaceAll(inner, `\\`, "")
+				inner = strings.ReplaceAll(inner, `\`+c, "")
+			} else {
+				inner = strings.ReplaceAll(inner, c+c, "")
+			}
+			if strings.Contains(inner, c) {
 				t.Fatalf("ident(%q) leaves an unescaped quote: %s", s, id)
+			}
+			if q.escapeBackslash && strings.Contains(inner, `\`) {
+				t.Fatalf("ident(%q) leaves an unescaped backslash: %s", s, id)
 			}
 		}
 	})

@@ -41,13 +41,14 @@ func (c *Column) UseCurrent() *Column {
 }
 
 // UseCurrentOnUpdate enables MySQL's automatic timestamp refresh.
-// Other dialects ignore it.
+// ClickHouse rejects it; other dialects ignore it.
 func (c *Column) UseCurrentOnUpdate() *Column {
 	c.def.useCurrentOnUpdate = true
 	return c
 }
 
-// Unsigned uses MySQL's unsigned integer type. Other dialects ignore it.
+// Unsigned uses MySQL's or ClickHouse's unsigned integer type. Other dialects
+// ignore it.
 func (c *Column) Unsigned() *Column {
 	c.def.unsigned = true
 	return c
@@ -85,13 +86,13 @@ func (c *Column) Comment(comment string) *Column {
 	return c
 }
 
-// After positions an altered MySQL column after another column.
+// After positions an altered MySQL or ClickHouse column after another column.
 func (c *Column) After(column string) *Column {
 	c.def.after = column
 	return c
 }
 
-// First positions an altered MySQL column first.
+// First positions an altered MySQL or ClickHouse column first.
 func (c *Column) First() *Column {
 	c.def.first = true
 	return c

@@ -137,14 +137,16 @@ type foreignDef struct {
 }
 
 type tableDef struct {
-	name    string
-	columns []*columnDef
-	indexes []*indexDef
-	checks  []*checkDef
-	fks     []*foreignDef
-	primary []string // composite primary key columns
-	comment string
-	errs    []error // declaration mistakes, surfaced at compile time
+	name                string
+	columns             []*columnDef
+	indexes             []*indexDef
+	checks              []*checkDef
+	fks                 []*foreignDef
+	primary             []string // composite primary key columns
+	comment             string
+	clickHouseEngine    string
+	clickHouseEngineSet bool
+	errs                []error // declaration mistakes, surfaced at compile time
 
 	// Recreate uses the final name while compiling temporary constraints.
 	constraintBase string

@@ -275,6 +275,7 @@ func (m *Migrator) Fresh(ctx context.Context) error {
 			tables = append(tables, m.cfg.table)
 		}
 		dropped := 0
+		var droppedTables []string
 		for len(tables) > 0 {
 			var remaining []string
 			var lastErr error
@@ -285,23 +286,28 @@ func (m *Migrator) Fresh(ctx context.Context) error {
 					continue
 				}
 				dropped++
+				droppedTables = append(droppedTables, table)
 			}
 			if len(remaining) == len(tables) {
-				return fmt.Errorf("migrate: fresh: drop tables: %w", lastErr)
+				return fmt.Errorf("migrate: fresh: drop tables: %w (%s)", lastErr,
+					freshProgressNote(droppedTables, remaining))
 			}
 			tables = remaining
 		}
 		// A surviving records table would make the following Up a silent no-op.
 		if _, err := conn.ExecContext(ctx, m.d.ensureTableSQL(m.cfg.table)); err != nil {
-			return fmt.Errorf("migrate: fresh: recreate records table: %w", err)
+			return fmt.Errorf("migrate: fresh: recreate records table: %w (%s)", err,
+				freshProgressNote(droppedTables, nil))
 		}
 		var stale int
 		row := conn.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", m.d.quoteIdent(m.cfg.table)))
 		if err := row.Scan(&stale); err != nil {
-			return fmt.Errorf("migrate: fresh: verify records table: %w", err)
+			return fmt.Errorf("migrate: fresh: verify records table: %w (%s)", err,
+				freshProgressNote(droppedTables, nil))
 		}
 		if stale > 0 {
-			return fmt.Errorf("migrate: fresh: records table %q survived the drop with %d records; drop it manually, then retry", m.cfg.table, stale)
+			return fmt.Errorf("migrate: fresh: records table %q survived the drop with %d records; drop it manually, then retry (%s)",
+				m.cfg.table, stale, freshProgressNote(droppedTables, []string{m.cfg.table}))
 		}
 		m.cfg.logger.Info("migrate: fresh dropped all tables", "tables", dropped)
 		return nil
@@ -309,7 +315,20 @@ func (m *Migrator) Fresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return m.Up(ctx)
+	if err := m.Up(ctx); err != nil {
+		return fmt.Errorf("migrate: fresh: the drop phase completed but reapplying migrations failed; the database was not automatically restored to its earlier state: %w", err)
+	}
+	return nil
+}
+
+func freshProgressNote(dropped, remaining []string) string {
+	if len(dropped) == 0 {
+		return fmt.Sprintf("no table was dropped; remaining tables: %q", remaining)
+	}
+	if len(remaining) == 0 {
+		return fmt.Sprintf("tables %q were already dropped and were not restored", dropped)
+	}
+	return fmt.Sprintf("tables %q were already dropped and were not restored; remaining tables: %q", dropped, remaining)
 }
 
 func (m *Migrator) listTables(ctx context.Context, db DB) ([]string, error) {
@@ -340,7 +359,6 @@ func (m *Migrator) Repair(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		table := m.d.quoteIdent(m.cfg.table)
 		count := 0
 		for _, r := range recs {
 			if r.batch == repeatableBatch {
@@ -357,8 +375,7 @@ func (m *Migrator) Repair(ctx context.Context) error {
 			if sum == strings.TrimSpace(r.checksum) {
 				continue
 			}
-			query := fmt.Sprintf("UPDATE %s SET checksum = %s WHERE version = %s",
-				table, m.d.placeholder(1), m.d.placeholder(2))
+			query := m.d.recordRepairSQL(m.cfg.table)
 			if _, err := conn.ExecContext(ctx, query, sum, r.version); err != nil {
 				return fmt.Errorf("migrate: repair %q: %w", r.version, err)
 			}

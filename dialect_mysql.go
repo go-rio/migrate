@@ -14,12 +14,28 @@ var MySQL Dialect = mysqlDialect{}
 
 type mysqlDialect struct{}
 
-const myQ = quoter('`')
+var myQ = quoter{delimiter: '`'}
 
-func (mysqlDialect) name() string           { return "mysql" }
-func (mysqlDialect) transactionalDDL() bool { return false }
+func (mysqlDialect) name() string                     { return "mysql" }
+func (mysqlDialect) transactionMode() transactionMode { return transactionModeDML }
 
 func (mysqlDialect) placeholder(int) string { return "?" }
+
+func (d mysqlDialect) recordInsertSQL(table string) string {
+	return standardRecordInsertSQL(d, table)
+}
+
+func (d mysqlDialect) recordUpdateSQL(table string) string {
+	return standardRecordUpdateSQL(d, table)
+}
+
+func (d mysqlDialect) recordDeleteSQL(table, column string) string {
+	return standardRecordDeleteSQL(d, table, column)
+}
+
+func (d mysqlDialect) recordRepairSQL(table string) string {
+	return standardRecordRepairSQL(d, table)
+}
 
 func (mysqlDialect) ensureTableSQL(table string) string {
 	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n"+

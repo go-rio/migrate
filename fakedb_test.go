@@ -145,7 +145,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, _ []driver.Name
 	case strings.Contains(query, "SELECT COUNT(*) FROM"):
 		return &fakeRows{cols: []string{"n"}, rows: [][]driver.Value{{int64(len(c.db.records))}}}, nil
 	case strings.Contains(query, "pg_tables"), strings.Contains(query, "information_schema.tables"),
-		strings.Contains(query, "sqlite_master"):
+		strings.Contains(query, "sqlite_master"), strings.Contains(query, "system.tables"):
 		rows := make([][]driver.Value, len(c.db.tables))
 		for i, t := range c.db.tables {
 			rows[i] = []driver.Value{t}

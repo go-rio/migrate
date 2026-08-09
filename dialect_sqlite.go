@@ -15,12 +15,28 @@ var SQLite Dialect = sqliteDialect{}
 
 type sqliteDialect struct{}
 
-const liteQ = quoter('"')
+var liteQ = quoter{delimiter: '"'}
 
-func (sqliteDialect) name() string           { return "sqlite" }
-func (sqliteDialect) transactionalDDL() bool { return true }
+func (sqliteDialect) name() string                     { return "sqlite" }
+func (sqliteDialect) transactionMode() transactionMode { return transactionModeFull }
 
 func (sqliteDialect) placeholder(int) string { return "?" }
+
+func (d sqliteDialect) recordInsertSQL(table string) string {
+	return standardRecordInsertSQL(d, table)
+}
+
+func (d sqliteDialect) recordUpdateSQL(table string) string {
+	return standardRecordUpdateSQL(d, table)
+}
+
+func (d sqliteDialect) recordDeleteSQL(table, column string) string {
+	return standardRecordDeleteSQL(d, table, column)
+}
+
+func (d sqliteDialect) recordRepairSQL(table string) string {
+	return standardRecordRepairSQL(d, table)
+}
 
 func (sqliteDialect) ensureTableSQL(table string) string {
 	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (

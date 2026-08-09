@@ -13,12 +13,28 @@ var Postgres Dialect = postgresDialect{}
 
 type postgresDialect struct{}
 
-const pgQ = quoter('"')
+var pgQ = quoter{delimiter: '"'}
 
-func (postgresDialect) name() string           { return "postgres" }
-func (postgresDialect) transactionalDDL() bool { return true }
+func (postgresDialect) name() string                     { return "postgres" }
+func (postgresDialect) transactionMode() transactionMode { return transactionModeFull }
 
 func (postgresDialect) placeholder(n int) string { return fmt.Sprintf("$%d", n) }
+
+func (d postgresDialect) recordInsertSQL(table string) string {
+	return standardRecordInsertSQL(d, table)
+}
+
+func (d postgresDialect) recordUpdateSQL(table string) string {
+	return standardRecordUpdateSQL(d, table)
+}
+
+func (d postgresDialect) recordDeleteSQL(table, column string) string {
+	return standardRecordDeleteSQL(d, table, column)
+}
+
+func (d postgresDialect) recordRepairSQL(table string) string {
+	return standardRecordRepairSQL(d, table)
+}
 
 func (postgresDialect) ensureTableSQL(table string) string {
 	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
