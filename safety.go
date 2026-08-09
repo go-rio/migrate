@@ -79,9 +79,10 @@ func analyzeSafety(dialect string, ops []operation) []string {
 				case *addPrimary:
 					warn("adding a primary key to existing table %q rewrites the table under lock on most engines", o.table)
 				case *addCheck:
-					if dialect == "postgres" {
+					switch dialect {
+					case "postgres":
 						warn("adding check constraint %q validates every row of %q under lock; on a large table add it NOT VALID via Exec, then VALIDATE CONSTRAINT separately", c.chk.name, o.table)
-					} else if dialect == "clickhouse" {
+					case "clickhouse":
 						warn("adding check constraint %q to ClickHouse table %q only constrains future inserts and does not validate historical rows", c.chk.name, o.table)
 					}
 				}
