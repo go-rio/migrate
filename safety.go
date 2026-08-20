@@ -3,6 +3,7 @@ package migrate
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrUnsafe marks a migration rejected by SafetyStrict.
@@ -117,9 +118,9 @@ func (m *Migrator) checkSafety(migs []*Migration) error {
 	if len(violations) == 0 {
 		return nil
 	}
-	msg := ""
+	var msg strings.Builder
 	for _, v := range violations {
-		msg += "\n  - " + v
+		msg.WriteString("\n  - " + v)
 	}
-	return fmt.Errorf("%w:%s\n(review each finding, then mark the migration Assured() or lower the level with WithSafety)", ErrUnsafe, msg)
+	return fmt.Errorf("%w:%s\n(review each finding, then mark the migration Assured() or lower the level with WithSafety)", ErrUnsafe, msg.String())
 }

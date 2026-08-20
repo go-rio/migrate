@@ -9,9 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # oldstable is Go 1.26, below this module's go directive. Restore it
-        # once 1.27.0 ships and oldstable reaches 1.27.
-        go: [ "stable" ]
+        go: ["stable"]
         platform: [ ubuntu-latest, macos-latest, windows-latest ]
     runs-on: ${{ matrix.platform }}
     steps:
@@ -33,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:18.6-alpine
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: migrate_test
@@ -45,7 +43,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       mysql:
-        image: mysql:8.4
+        image: mysql:9.7
         env:
           MYSQL_ROOT_PASSWORD: root
           MYSQL_DATABASE: migrate_test

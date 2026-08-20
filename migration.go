@@ -67,8 +67,8 @@ func (m *Migration) downOps() ([]operation, error) {
 		return nil, err
 	}
 	downs := make([]operation, 0, len(ups))
-	for i := len(ups) - 1; i >= 0; i-- {
-		inv, err := ups[i].inverse()
+	for _, up := range slices.Backward(ups) {
+		inv, err := up.inverse()
 		if err != nil {
 			return nil, fmt.Errorf("migration %q: %w", m.name, err)
 		}

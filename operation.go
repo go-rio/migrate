@@ -3,6 +3,7 @@ package migrate
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -220,8 +221,8 @@ type alterTable struct {
 
 func (o *alterTable) inverse() (operation, error) {
 	inv := &alterTable{table: o.table, changes: make([]change, 0, len(o.changes))}
-	for i := len(o.changes) - 1; i >= 0; i-- {
-		cs, err := o.changes[i].inverseChange(o.table)
+	for _, v := range slices.Backward(o.changes) {
+		cs, err := v.inverseChange(o.table)
 		if err != nil {
 			return nil, err
 		}

@@ -54,11 +54,9 @@ func TestPostgresConcurrentMigrators(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
 	for i, db := range []*sql.DB{db1, db2} {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs[i] = run(db)
-		}()
+		})
 	}
 	wg.Wait()
 	for i, err := range errs {
@@ -153,7 +151,7 @@ func TestPostgresRecreate(t *testing.T) {
 		t.Errorf("orders_pkey should exist after the rebuild, got %d", got)
 	}
 	if got := count(t, db, `SELECT COUNT(*) FROM pg_constraint WHERE conname LIKE '%__migrate_new%'`); got != 0 {
-		t.Error("no constraint may keep the temporary name")
+		t.Fatal("no constraint may keep the temporary name")
 	}
 	// The copied identity sequence must advance past existing rows.
 	mustExec(t, db, "INSERT INTO counters (name) VALUES ('c')")

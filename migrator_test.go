@@ -758,6 +758,9 @@ func TestRollbackRejectsNonPositiveSteps(t *testing.T) {
 
 // MySQL lock timeouts round up to whole seconds.
 func TestMySQLLockTimeoutRoundsUp(t *testing.T) {
+	if got, want := mysqlLockName("test", "schema_migrations"), lockToken("840234d575b79fe6721ef7397b4bd71100ef1b388f8327ba946ef206e9850075"); got != want {
+		t.Fatalf("MySQL lock name = %q, want %q", got, want)
+	}
 	for timeout, want := range map[time.Duration]int64{
 		500 * time.Millisecond:  1,
 		time.Second:             1,
@@ -772,6 +775,10 @@ func TestMySQLLockTimeoutRoundsUp(t *testing.T) {
 	m := testMigrator(t, f, MySQL, twoTables(), WithLockTimeout(500*time.Millisecond))
 	if err := m.Up(context.Background()); err != nil {
 		t.Fatalf("Up: %v", err)
+	}
+	locks := f.loggedContaining("GET_LOCK")
+	if len(locks) != 1 || locks[0] != "SELECT GET_LOCK(?, ?)" {
+		t.Fatalf("MySQL lock must pass its name as a parameter: %v", locks)
 	}
 }
 

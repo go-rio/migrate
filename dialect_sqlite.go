@@ -254,8 +254,11 @@ func (sqliteDialect) listTriggers(ctx context.Context, db DB, table string) ([]s
 		"SELECT sql FROM "+master+" WHERE type = 'trigger' AND tbl_name = ? ORDER BY name", baseName(table))
 }
 
-func (sqliteDialect) lock(context.Context, *sql.Conn, string, time.Duration) error { return nil }
-func (sqliteDialect) unlock(context.Context, *sql.Conn, string) error              { return nil }
+func (sqliteDialect) lock(context.Context, *sql.Conn, string, time.Duration) (lockToken, error) {
+	return "", nil
+}
+
+func (sqliteDialect) unlock(context.Context, *sql.Conn, lockToken) error { return nil }
 
 func (sqliteDialect) quoteIdent(name string) string { return liteQ.table(name) }
 

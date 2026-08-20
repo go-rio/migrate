@@ -117,6 +117,8 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, _ []driver.Name
 	c.db.mu.Lock()
 	defer c.db.mu.Unlock()
 	switch {
+	case query == "SELECT DATABASE()":
+		return &fakeRows{cols: []string{"database"}, rows: [][]driver.Value{{"test"}}}, nil
 	case strings.Contains(query, "pg_try_advisory_lock"), strings.Contains(query, "GET_LOCK"):
 		acquired := int64(1)
 		if c.db.denyLock {

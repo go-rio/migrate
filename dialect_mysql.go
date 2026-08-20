@@ -2,7 +2,9 @@ package migrate
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -269,27 +271,33 @@ func (mysqlDialect) typeSQL(c *columnDef) (string, error) {
 	}
 }
 
-// GET_LOCK is scoped by schema and records table, then hashed to its 64-byte
-// limit. The session releases it on disconnect.
-const myLockName = "CONCAT('go-rio.migrate.', MD5(CONCAT(IFNULL(DATABASE(), ''), ':', ?)))"
+func mysqlLockName(database, table string) lockToken {
+	sum := sha256.Sum256([]byte("go-rio.migrate\x00" + database + "\x00" + table))
+	return lockToken(hex.EncodeToString(sum[:]))
+}
 
-func (mysqlDialect) lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) error {
+func (mysqlDialect) lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) (lockToken, error) {
+	var database sql.NullString
+	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&database); err != nil {
+		return "", fmt.Errorf("migrate: resolve advisory lock namespace: %w", err)
+	}
+	token := mysqlLockName(database.String, table)
 	// GET_LOCK counts whole seconds, so round up.
 	seconds := int64((timeout + time.Second - 1) / time.Second)
 	var acquired sql.NullInt64
-	err := conn.QueryRowContext(ctx, "SELECT GET_LOCK("+myLockName+", ?)", table, seconds).Scan(&acquired)
+	err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", string(token), seconds).Scan(&acquired)
 	if err != nil {
-		return fmt.Errorf("migrate: acquire advisory lock: %w", err)
+		return "", fmt.Errorf("migrate: acquire advisory lock: %w", err)
 	}
 	if !acquired.Valid || acquired.Int64 != 1 {
-		return fmt.Errorf("%w: waited %v for the advisory lock", ErrLockTimeout, timeout)
+		return "", fmt.Errorf("%w: waited %v for the advisory lock", ErrLockTimeout, timeout)
 	}
-	return nil
+	return token, nil
 }
 
-func (mysqlDialect) unlock(ctx context.Context, conn *sql.Conn, table string) error {
+func (mysqlDialect) unlock(ctx context.Context, conn *sql.Conn, token lockToken) error {
 	var released sql.NullInt64
-	err := conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK("+myLockName+")", table).Scan(&released)
+	err := conn.QueryRowContext(ctx, "SELECT RELEASE_LOCK(?)", string(token)).Scan(&released)
 	if err != nil {
 		return fmt.Errorf("migrate: release advisory lock: %w", err)
 	}

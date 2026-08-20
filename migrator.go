@@ -509,14 +509,15 @@ func (m *Migrator) locked(ctx context.Context, fn func(*sql.Conn) error) error {
 	}
 	defer func() { _ = conn.Close() }()
 	if m.cfg.lock {
-		if err := m.d.lock(ctx, conn, m.cfg.table, m.cfg.lockTimeout); err != nil {
+		token, err := m.d.lock(ctx, conn, m.cfg.table, m.cfg.lockTimeout)
+		if err != nil {
 			return err
 		}
 		defer func() {
 			// Unlock after cancellation, but rely on connection close after 10s.
 			unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
-			if err := m.d.unlock(unlockCtx, conn, m.cfg.table); err != nil {
+			if err := m.d.unlock(unlockCtx, conn, token); err != nil {
 				m.cfg.logger.Warn("migrate: release lock", "error", err)
 			}
 		}()

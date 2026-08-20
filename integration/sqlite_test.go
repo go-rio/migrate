@@ -60,16 +60,14 @@ func TestSQLiteConcurrentMigrators(t *testing.T) {
 	errs := make([]error, racers)
 	var wg sync.WaitGroup
 	for i := range racers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			m, err := migrate.New(dbs[i], migrate.SQLite, migrate.WithCollection(collection()))
 			if err != nil {
 				errs[i] = err
 				return
 			}
 			errs[i] = m.Up(ctx)
-		}()
+		})
 	}
 	wg.Wait()
 

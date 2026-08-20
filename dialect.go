@@ -25,11 +25,13 @@ type Dialect interface {
 	recordUpdateSQL(table string) string
 	recordDeleteSQL(table, column string) string
 	recordRepairSQL(table string) string
-	lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) error
-	unlock(ctx context.Context, conn *sql.Conn, table string) error
+	lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) (lockToken, error)
+	unlock(ctx context.Context, conn *sql.Conn, token lockToken) error
 	listTablesSQL() string
 	freshDropSQL(table string) string
 }
+
+type lockToken string
 
 // transactionMode describes the guarantees available to one migration. It is
 // deliberately more precise than a transactional-DDL boolean: MySQL protects
