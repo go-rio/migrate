@@ -245,7 +245,13 @@ func (t *Table) Spatial(columns ...string) *Index {
 	return &Index{def: idx}
 }
 
-// IndexExpr declares a named index over SQL expressions written verbatim.
+// IndexExpr declares a named index over SQL expressions written verbatim
+// into the index key list. Wrap an expression yourself when the database
+// demands it — PostgreSQL needs "(a + b)" for arithmetic — and append
+// anything that belongs outside the parentheses, like an operator class:
+// "lower(email) text_pattern_ops". MySQL is the one exception: it requires
+// every functional key part parenthesized, so each expression gains one
+// pair there.
 func (t *Table) IndexExpr(name string, exprs ...string) *Index {
 	return t.exprIndex(name, exprs, false)
 }

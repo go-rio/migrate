@@ -84,15 +84,45 @@ func TestExpressionIndex(t *testing.T) {
 		})
 	}
 
+	// Expressions render verbatim: a forced wrapper would swallow trailing
+	// key options like a PostgreSQL operator class.
 	assertSQL(t, compileSchema(t, Postgres, lower), []string{
-		`CREATE UNIQUE INDEX "users_email_lower_unique" ON "users" ((lower(email)))`,
+		`CREATE UNIQUE INDEX "users_email_lower_unique" ON "users" (lower(email))`,
 	})
 	// MySQL requires each functional key part to be parenthesized.
 	assertSQL(t, compileSchema(t, MySQL, lower), []string{
 		"CREATE UNIQUE INDEX `users_email_lower_unique` ON `users` ((lower(email)))",
 	})
 	assertSQL(t, compileSchema(t, SQLite, lower), []string{
-		`CREATE UNIQUE INDEX "users_email_lower_unique" ON "users" ((lower(email)))`,
+		`CREATE UNIQUE INDEX "users_email_lower_unique" ON "users" (lower(email))`,
+	})
+}
+
+func TestExpressionIndexOperatorClass(t *testing.T) {
+	assertSQL(t, compileSchema(t, Postgres, func(s *Schema) {
+		s.Table("orders", func(t *Table) {
+			t.IndexExpr("orders_number_prefix", "lower(order_number) text_pattern_ops")
+		})
+	}), []string{
+		`CREATE INDEX "orders_number_prefix" ON "orders" (lower(order_number) text_pattern_ops)`,
+	})
+}
+
+func TestExpressionIndexMultiExpr(t *testing.T) {
+	multi := func(s *Schema) {
+		s.Table("orders", func(t *Table) {
+			t.IndexExpr("orders_math", "(price + tax)", "lower(code)")
+		})
+	}
+	assertSQL(t, compileSchema(t, Postgres, multi), []string{
+		`CREATE INDEX "orders_math" ON "orders" ((price + tax), lower(code))`,
+	})
+	// The caller's own parentheses survive MySQL's mandatory wrapping.
+	assertSQL(t, compileSchema(t, MySQL, multi), []string{
+		"CREATE INDEX `orders_math` ON `orders` (((price + tax)), (lower(code)))",
+	})
+	assertSQL(t, compileSchema(t, SQLite, multi), []string{
+		`CREATE INDEX "orders_math" ON "orders" ((price + tax), lower(code))`,
 	})
 }
 

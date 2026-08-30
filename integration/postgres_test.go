@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -251,5 +252,81 @@ func TestPostgresRecreateReferencedParentFailsCleanly(t *testing.T) {
 	}
 	if got := count(t, db, `SELECT COUNT(*) FROM schema_migrations`); got != 2 {
 		t.Errorf("the failed migration must not be recorded, got %d records", got)
+	}
+}
+
+// Every expression-index shape PostgreSQL accepts must round-trip through
+// IndexExpr verbatim: bare function calls, an operator class trailing the
+// call (the part a forced wrapper used to swallow), caller-parenthesized
+// arithmetic, several expressions in one key list, a partial predicate, an
+// explicit method, and the unique form.
+func TestPostgresExpressionIndexes(t *testing.T) {
+	ctx := context.Background()
+	db := openPostgres(t)
+	dropAll(t, db)
+	mustExec(t, db, "DROP TABLE IF EXISTS idx_items")
+
+	c := migrate.NewCollection()
+	c.Add("20260831000000_expression_indexes", func(s *migrate.Schema) {
+		s.Create("idx_items", func(tb *migrate.Table) {
+			tb.ID()
+			tb.String("email")
+			tb.String("order_number")
+			tb.Integer("a")
+			tb.Integer("b")
+			tb.String("code")
+		})
+		s.Table("idx_items", func(tb *migrate.Table) {
+			tb.IndexExpr("ie_lower", "lower(email)")
+			tb.IndexExpr("ie_opclass", "lower(order_number) text_pattern_ops")
+			tb.IndexExpr("ie_arith", "(a + b)")
+			tb.IndexExpr("ie_multi", "(a + b)", "lower(code)")
+			tb.IndexExpr("ie_partial", "lower(code)").Where("b > 0")
+			tb.IndexExpr("ie_using", "lower(code)").Using("btree")
+			tb.UniqueExpr("ie_unique", "lower(email)")
+		})
+	})
+	m, err := migrate.New(db, migrate.Postgres, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	t.Cleanup(func() { mustExec(t, db, "DROP TABLE IF EXISTS idx_items") })
+
+	rows, err := db.Query(
+		"SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'idx_items' AND indexname LIKE 'ie_%'",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	defs := map[string]string{}
+	for rows.Next() {
+		var name, def string
+		if err := rows.Scan(&name, &def); err != nil {
+			t.Fatal(err)
+		}
+		defs[name] = def
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ie_lower", "ie_opclass", "ie_arith", "ie_multi", "ie_partial", "ie_using", "ie_unique"} {
+		if defs[want] == "" {
+			t.Fatalf("index %s missing; have %v", want, defs)
+		}
+	}
+	if def := defs["ie_opclass"]; !strings.Contains(def, "text_pattern_ops") {
+		t.Fatalf("operator class lost: %s", def)
+	}
+	if def := defs["ie_partial"]; !strings.Contains(def, "WHERE") {
+		t.Fatalf("partial predicate lost: %s", def)
+	}
+
+	mustExec(t, db, "INSERT INTO idx_items (email, order_number, a, b, code) VALUES ('X@a.com', 'N1', 1, 2, 'c')")
+	if _, err := db.Exec("INSERT INTO idx_items (email, order_number, a, b, code) VALUES ('x@A.COM', 'N2', 3, 4, 'd')"); err == nil {
+		t.Fatal("unique expression index did not enforce lower(email) uniqueness")
 	}
 }

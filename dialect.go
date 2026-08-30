@@ -278,10 +278,17 @@ func validateIndex(dialect, table string, idx *indexDef) error {
 	return nil
 }
 
-// indexItems parenthesizes expressions for MySQL functional indexes.
-func indexItems(q quoter, idx *indexDef) string {
+// indexItems renders the index key list. MySQL requires each functional key
+// part wrapped in its own parentheses; everywhere else expressions pass
+// verbatim — a forced wrapper would swallow what must stay outside the
+// parentheses, like a PostgreSQL operator class in
+// "lower(email) text_pattern_ops".
+func indexItems(dialect string, q quoter, idx *indexDef) string {
 	if len(idx.exprs) == 0 {
 		return q.idents(idx.columns)
+	}
+	if dialect != "mysql" {
+		return strings.Join(idx.exprs, ", ")
 	}
 	items := make([]string, len(idx.exprs))
 	for i, e := range idx.exprs {
@@ -329,7 +336,7 @@ func createIndexSQL(dialect string, q quoter, table string, idx *indexDef, schem
 	if idx.using != "" && dialect == "postgres" {
 		b.WriteString(" USING " + idx.using)
 	}
-	b.WriteString(" (" + indexItems(q, idx) + ")")
+	b.WriteString(" (" + indexItems(dialect, q, idx) + ")")
 	if idx.using != "" && dialect == "mysql" {
 		b.WriteString(" USING " + strings.ToUpper(idx.using))
 	}
