@@ -315,7 +315,14 @@ func createIndexSQL(dialect string, q quoter, table string, idx *indexDef, schem
 	name := idx.resolvedName(table)
 	var b strings.Builder
 	if schemaOnIndex {
-		fmt.Fprintf(&b, "CREATE %sINDEX %s%s ON %s", kind, concurrently, q.table(schemaPrefix(table)+name), q.ident(baseName(table)))
+		fmt.Fprintf(
+			&b,
+			"CREATE %sINDEX %s%s ON %s",
+			kind,
+			concurrently,
+			q.table(schemaPrefix(table)+name),
+			q.ident(baseName(table)),
+		)
 	} else {
 		fmt.Fprintf(&b, "CREATE %sINDEX %s%s ON %s", kind, concurrently, q.ident(name), q.table(table))
 	}

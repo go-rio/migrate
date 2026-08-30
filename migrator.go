@@ -275,9 +275,13 @@ func (m *Migrator) prepareOne(mig *Migration, up bool, bookkeep statement) (prep
 		return preparedMigration{}, err
 	}
 	arbiter := -1
-	if up && mig.useTx && m.d.name() == "sqlite" {
-		// SQLite has no advisory lock. Writing the record first makes a racing
-		// migrator lose before it can change the schema.
+	if mig.useTx && m.d.name() == "sqlite" {
+		// SQLite has no advisory lock, so the record statement runs first and
+		// arbitrates the race inside the transaction: up's INSERT hits the
+		// version UNIQUE key when another migrator already applied this
+		// migration, and down's DELETE affects zero rows when another already
+		// rolled it back. Either way the loser aborts before touching the
+		// schema.
 		stmts = append([]statement{bookkeep}, stmts...)
 		arbiter = 0
 	} else {
@@ -304,12 +308,19 @@ func (m *Migrator) runPrepared(ctx context.Context, conn *sql.Conn, run prepared
 	var err error
 	switch {
 	case run.mig.useTx && m.d.transactionMode() != transactionModeNone:
-		err = m.runInTx(ctx, conn, run.stmts, run.arbiter)
+		err = m.runInTx(ctx, conn, run)
 	default:
 		failed := 0
-		failed, err = runStatements(ctx, conn, run.stmts)
-		if err != nil && m.d.transactionMode() == transactionModeNone {
-			err = fmt.Errorf("%w (%s)", err, nonTransactionalNote(m.d.name(), failed, len(run.stmts)))
+		failed, err = runStatements(ctx, conn, run.stmts, -1)
+		if err != nil {
+			if m.d.transactionMode() == transactionModeNone {
+				err = fmt.Errorf("%w (%s)", err, nonTransactionalNote(m.d.name(), failed, len(run.stmts)))
+			} else {
+				// The dialect has transactions; the migration declared
+				// WithoutTransaction, so every completed statement is already
+				// committed under autocommit.
+				err = fmt.Errorf("%w (%s)", err, withoutTxNote(failed, len(run.stmts)))
+			}
 		}
 	}
 	if err != nil {
@@ -320,21 +331,29 @@ func (m *Migrator) runPrepared(ctx context.Context, conn *sql.Conn, run prepared
 	return nil
 }
 
-// arbiter identifies SQLite's record-first concurrency check.
-func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statement, arbiter int) error {
+// runInTx applies one prepared migration inside a transaction. run.arbiter
+// identifies SQLite's record-first concurrency check; run.up decides which
+// loss signal applies (INSERT unique violation vs DELETE of zero rows).
+func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, run preparedMigration) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	if failed, err := runStatements(ctx, tx, stmts); err != nil {
+	arbiterDelete := -1
+	if !run.up {
+		arbiterDelete = run.arbiter
+	}
+	if failed, err := runStatements(ctx, tx, run.stmts, arbiterDelete); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
 			m.cfg.logger.Warn("migrate: rollback after failure", "error", rbErr)
 		}
 		switch {
-		case failed == arbiter && strings.Contains(err.Error(), "UNIQUE constraint failed"):
+		case failed == run.arbiter && errors.Is(err, errConcurrentRollback):
+			err = fmt.Errorf("%w (another migrator rolled this migration back concurrently; this transaction rolled back before touching the schema — rerun to verify the remaining state)", err)
+		case failed == run.arbiter && strings.Contains(err.Error(), "UNIQUE constraint failed"):
 			err = fmt.Errorf("%w (another migrator applied this migration concurrently; this transaction rolled back before touching the schema — rerun to verify nothing is pending)", err)
 		case m.d.transactionMode() == transactionModeDML:
-			err = fmt.Errorf("%w (%s)", err, implicitCommitNote(m.d.name(), stmts, failed))
+			err = fmt.Errorf("%w (%s)", err, implicitCommitNote(m.d.name(), run.stmts, failed))
 		}
 		return err
 	}
@@ -344,53 +363,95 @@ func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, stmts []statemen
 	return nil
 }
 
+// recordFate says whether the trailing migration-record statement ran; the
+// three failure notes below share it verbatim.
+func recordFate(failed, total int) string {
+	if failed == total-1 {
+		return "the final migration-record statement did not report success"
+	}
+	return "the final migration-record statement was not reached"
+}
+
+// statementSpan pluralizes the completed statement prefix.
+func statementSpan(failed int) (span, verb string) {
+	if failed == 1 {
+		return "statement 1", "is"
+	}
+	return fmt.Sprintf("statements 1-%d", failed), "are"
+}
+
 // nonTransactionalNote describes the successfully executed prefix when a
 // dialect cannot put a migration inside one transaction. failed is the
 // zero-based failing statement.
 func nonTransactionalNote(dialect string, failed, total int) string {
-	history := "the final migration-record statement was not reached"
-	if failed == total-1 {
-		history = "the final migration-record statement did not report success"
-	}
+	history := recordFate(failed, total)
 	if failed == 0 {
 		return fmt.Sprintf("%s has no multi-statement migration transaction; no earlier statement completed and %s; inspect the failed statement and migration records before retrying", dialect, history)
 	}
-	span := fmt.Sprintf("statements 1-%d", failed)
-	if failed == 1 {
-		span = "statement 1"
-	}
+	span, _ := statementSpan(failed)
 	return fmt.Sprintf("%s has no multi-statement migration transaction: %s may already be effective, the failed statement did not report success, and %s; reconcile the actual schema and migration records before retrying or baselining",
 		dialect, span, history)
+}
+
+// withoutTxNote describes the committed prefix when a migration on a
+// transactional dialect declared WithoutTransaction: every statement ran
+// under autocommit. failed is the zero-based failing statement.
+func withoutTxNote(failed, total int) string {
+	history := recordFate(failed, total)
+	if failed == 0 {
+		return fmt.Sprintf("this migration declared WithoutTransaction; no earlier statement completed and %s; inspect the failed statement and migration records before retrying", history)
+	}
+	span, verb := statementSpan(failed)
+	return fmt.Sprintf("this migration declared WithoutTransaction, so each statement committed as it ran: %s %s already applied, the failed statement did not report success, and %s; reconcile the actual schema and migration records before retrying or baselining",
+		span, verb, history)
 }
 
 // implicitCommitNote describes the prefix persisted by MySQL's implicit DDL
 // commits. failed is the zero-based failing statement.
 func implicitCommitNote(dialect string, stmts []statement, failed int) string {
 	dirty := false
+	goFn := false
 	for _, s := range stmts[:min(failed+1, len(stmts))] {
 		if s.ddl {
 			dirty = true
-			break
+		}
+		if s.fn != nil {
+			goFn = true
 		}
 	}
 	if !dirty || failed == 0 {
+		if goFn {
+			// A Run function is opaque: DDL inside it commits implicitly and
+			// invisibly. The report must never understate commits, so it
+			// cannot claim the database is unchanged.
+			return "the transaction rolled back; Go migration functions ran inside it and their DML rolled back too, but " + dialect + " commits DDL implicitly and rio cannot see inside Run — verify any DDL a function issued before retrying"
+		}
 		return "the transaction rolled back: the database is unchanged by this migration"
 	}
-	span, verb := fmt.Sprintf("statements 1-%d", failed), "are"
-	if failed == 1 {
-		span, verb = "statement 1", "is"
-	}
+	span, verb := statementSpan(failed)
 	return fmt.Sprintf("%s DDL commits implicitly: %s of this migration %s already committed — DML before a DDL commits with it, statements after one commit individually under autocommit — and the rollback undid none of it; reconcile the schema before retrying",
 		dialect, span, verb)
 }
 
-func runStatements(ctx context.Context, db DB, stmts []statement) (int, error) {
+// errConcurrentRollback marks the record-first DELETE affecting zero rows:
+// another migrator already removed the record and ran the down statements.
+var errConcurrentRollback = errors.New("the migration record was already deleted")
+
+// arbiterDelete indexes a record-first DELETE whose zero-rows result means a
+// concurrent migrator won the rollback race; -1 disables the check.
+func runStatements(ctx context.Context, db DB, stmts []statement, arbiterDelete int) (int, error) {
 	for i, s := range stmts {
 		var err error
 		if s.fn != nil {
 			err = s.fn(ctx, db)
-		} else if _, execErr := db.ExecContext(ctx, s.sql, s.args...); execErr != nil {
+		} else if res, execErr := db.ExecContext(ctx, s.sql, s.args...); execErr != nil {
 			err = execErr
+		} else if i == arbiterDelete {
+			if n, aerr := res.RowsAffected(); aerr != nil {
+				err = aerr
+			} else if n == 0 {
+				err = errConcurrentRollback
+			}
 		}
 		if err != nil {
 			return i, fmt.Errorf("statement %d/%d (%s): %w", i+1, len(stmts), describeStatement(s), err)

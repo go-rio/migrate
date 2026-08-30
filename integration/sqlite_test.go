@@ -14,14 +14,8 @@ import (
 
 func openSQLite(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := "file:" + filepath.Join(t.TempDir(), "app.db") +
-		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return mustOpen(t, "file:"+filepath.Join(t.TempDir(), "app.db")+
+		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 }
 
 func TestSQLiteEndToEnd(t *testing.T)     { runEndToEnd(t, openSQLite(t), migrate.SQLite) }
@@ -49,12 +43,7 @@ func TestSQLiteConcurrentMigrators(t *testing.T) {
 	const racers = 8
 	dbs := make([]*sql.DB, racers)
 	for i := range dbs {
-		db, err := sql.Open("sqlite", dsn)
-		if err != nil {
-			t.Fatalf("open sqlite: %v", err)
-		}
-		t.Cleanup(func() { _ = db.Close() })
-		dbs[i] = db
+		dbs[i] = mustOpen(t, dsn)
 	}
 
 	errs := make([]error, racers)
@@ -100,6 +89,88 @@ func TestSQLiteConcurrentMigrators(t *testing.T) {
 	if err := m.Up(ctx); err != nil {
 		t.Fatalf("a rerun after the race must be a clean no-op: %v", err)
 	}
+}
+
+// Rollback gets the same record-first arbitration as Up: the down statements
+// of a lost race must never run twice — a data-restoring down applied twice
+// would corrupt, and even an idempotent one must lose loudly.
+func TestSQLiteConcurrentRollback(t *testing.T) {
+	ctx := context.Background()
+	dsn := "file:" + filepath.Join(t.TempDir(), "app.db") + "?_pragma=busy_timeout(5000)"
+
+	collection := func() *migrate.Collection {
+		c := migrate.NewCollection()
+		c.Add("001_counters", func(s *migrate.Schema) {
+			s.Create("counters", func(t *migrate.Table) {
+				t.ID()
+				t.Integer("v").Default(0)
+			})
+			s.Exec("INSERT INTO counters (v) VALUES (10)")
+		}, migrate.WithDown(func(s *migrate.Schema) {
+			// Deliberately non-idempotent: a double-applied down is visible.
+			s.Exec("UPDATE counters SET v = v - 10")
+		}))
+		return c
+	}
+
+	setup, err := migrate.New(mustOpen(t, dsn), migrate.SQLite, migrate.WithCollection(collection()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+
+	const racers = 8
+	dbs := make([]*sql.DB, racers)
+	for i := range dbs {
+		dbs[i] = mustOpen(t, dsn)
+	}
+	errs := make([]error, racers)
+	var wg sync.WaitGroup
+	for i := range racers {
+		wg.Go(func() {
+			m, err := migrate.New(dbs[i], migrate.SQLite, migrate.WithCollection(collection()))
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			errs[i] = m.Rollback(ctx, 1)
+		})
+	}
+	wg.Wait()
+
+	winners := 0
+	for i, err := range errs {
+		if err == nil {
+			winners++
+			continue
+		}
+		if !strings.Contains(err.Error(), "another migrator") {
+			t.Errorf("racer %d leaked a raw race error: %v", i, err)
+		}
+	}
+	// Losers that started after the winner deleted the record see an empty
+	// state and no-op; losers racing inside the window lose on the arbiter.
+	if winners == 0 {
+		t.Error("at least one racer must win")
+	}
+	if got := count(t, dbs[0], "SELECT v FROM counters"); got != 0 {
+		t.Errorf("the down must run exactly once: v = %d, want 0", got)
+	}
+	if got := count(t, dbs[0], "SELECT COUNT(*) FROM schema_migrations"); got != 0 {
+		t.Errorf("the record must be deleted exactly once, got %d rows", got)
+	}
+}
+
+func mustOpen(t *testing.T, dsn string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 func TestSQLiteAutoIncrement(t *testing.T) {
@@ -376,11 +447,7 @@ func TestSQLiteFresh(t *testing.T) {
 func TestSQLiteFreshQualifiedRecordsTable(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "main.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := mustOpen(t, "file:"+filepath.Join(dir, "main.db"))
 	// ATTACH is connection-local.
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec("ATTACH DATABASE '" + filepath.Join(dir, "aux.db") + "' AS aux"); err != nil {
@@ -421,12 +488,7 @@ func TestSQLiteFreshQualifiedRecordsTable(t *testing.T) {
 func TestSQLiteQualifiedNames(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := sql.Open("sqlite",
-		"file:"+filepath.Join(dir, "main.db")+"?_pragma=foreign_keys(1)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := mustOpen(t, "file:"+filepath.Join(dir, "main.db")+"?_pragma=foreign_keys(1)")
 	// ATTACH is connection-local.
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec("ATTACH DATABASE '" + filepath.Join(dir, "aux.db") + "' AS aux"); err != nil {

@@ -363,7 +363,12 @@ func (d postgresDialect) recreateEpilogue(def *tableDef) []statement {
 // connection and does not block CREATE INDEX CONCURRENTLY through a snapshot.
 const pgLockKey = "hashtextextended('go-rio/migrate:' || current_database() || ':' || $1, 0)"
 
-func (postgresDialect) lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) (lockToken, error) {
+func (postgresDialect) lock(
+	ctx context.Context,
+	conn *sql.Conn,
+	table string,
+	timeout time.Duration,
+) (lockToken, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		var acquired bool
@@ -386,7 +391,8 @@ func (postgresDialect) lock(ctx context.Context, conn *sql.Conn, table string, t
 
 func (postgresDialect) unlock(ctx context.Context, conn *sql.Conn, token lockToken) error {
 	var released bool
-	if err := conn.QueryRowContext(ctx, "SELECT pg_advisory_unlock("+pgLockKey+")", string(token)).Scan(&released); err != nil {
+	row := conn.QueryRowContext(ctx, "SELECT pg_advisory_unlock("+pgLockKey+")", string(token))
+	if err := row.Scan(&released); err != nil {
 		return fmt.Errorf("migrate: release advisory lock: %w", err)
 	}
 	if !released {

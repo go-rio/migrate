@@ -5,9 +5,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
@@ -157,6 +161,11 @@ func validateSchema(name string, s *Schema) error {
 }
 
 // checksum covers compiled SQL and arguments, but not opaque Run functions.
+// The encoding is injective: every part is type-tagged and length-prefixed,
+// so neither statement boundaries nor value types can collide — "A" with
+// argument "B" never hashes like plain "A" then "B", and 1 never hashes like
+// "1". Pointer arguments dereference, exactly as driver execution does, so a
+// checksum never captures an address and stays stable across processes.
 func (m *Migration) checksum(d Dialect) (string, error) {
 	stmts, err := m.compile(d, true)
 	if err != nil {
@@ -165,16 +174,71 @@ func (m *Migration) checksum(d Dialect) (string, error) {
 	h := sha256.New()
 	for _, s := range stmts {
 		if s.fn != nil {
-			h.Write([]byte("<go>\x00"))
+			_, _ = io.WriteString(h, "g")
 			continue
 		}
-		h.Write([]byte(s.sql))
+		_, _ = fmt.Fprintf(h, "q%d:%s", len(s.sql), s.sql)
 		for _, a := range s.args {
-			_, _ = fmt.Fprintf(h, "\x00%v", a)
+			if err := checksumArg(h, s, a); err != nil {
+				return "", err
+			}
 		}
-		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// checksumArg writes one argument's canonical form. Unsupported types are an
+// error rather than a lossy fallback: a value the encoding cannot pin down
+// would make drift detection lie in one direction or the other.
+func checksumArg(h io.Writer, s statement, a any) error {
+	if a == nil {
+		_, _ = io.WriteString(h, "n")
+		return nil
+	}
+	rv := reflect.ValueOf(a)
+	for rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			_, _ = io.WriteString(h, "n")
+			return nil
+		}
+		rv = rv.Elem()
+	}
+	if t, ok := rv.Interface().(time.Time); ok {
+		// RFC 3339 in UTC rather than UnixNano: no epoch-range surprises.
+		stamp := t.UTC().Format(time.RFC3339Nano)
+		_, _ = fmt.Fprintf(h, "t%d:%s", len(stamp), stamp)
+		return nil
+	}
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		_, _ = fmt.Fprintf(h, "i%d", rv.Int())
+		return nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		_, _ = fmt.Fprintf(h, "u%d", rv.Uint())
+		return nil
+	case reflect.Float32, reflect.Float64:
+		// Bit-exact: %v would fold 1.0 into 1 and drift on formatting rules.
+		_, _ = fmt.Fprintf(h, "f%x", math.Float64bits(rv.Float()))
+		return nil
+	case reflect.Bool:
+		_, _ = fmt.Fprintf(h, "b%t", rv.Bool())
+		return nil
+	case reflect.String:
+		str := rv.String()
+		_, _ = fmt.Fprintf(h, "s%d:%s", len(str), str)
+		return nil
+	case reflect.Slice:
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			b := rv.Bytes()
+			_, _ = fmt.Fprintf(h, "x%d:", len(b))
+			_, _ = h.Write(b)
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"migrate: cannot checksum a %T argument (statement %q); pass a plain scalar, []byte, or time.Time",
+		a, describeStatement(s),
+	)
 }
 
 func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {

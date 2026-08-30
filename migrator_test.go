@@ -392,6 +392,48 @@ func TestMySQLMixedFailureNamesCommittedPrefix(t *testing.T) {
 	}
 }
 
+// A Run function is opaque — DDL inside it commits implicitly on MySQL — so
+// a failure report covering one must never claim the database is unchanged.
+func TestMySQLRunFunctionFailureNeverClaimsUnchanged(t *testing.T) {
+	f := newFakeDB()
+	c := NewCollection()
+	c.Add("001_backfill", func(s *Schema) {
+		s.Run(func(ctx context.Context, db DB) error { return nil })
+		s.Exec("INSERT INTO broken (x) VALUES (1)")
+	}, WithDown(func(s *Schema) {}))
+	f.fail("broken", errors.New("boom"))
+	err := testMigrator(t, f, MySQL, c).Up(context.Background())
+	if err == nil {
+		t.Fatal("Up should fail")
+	}
+	if strings.Contains(err.Error(), "unchanged") {
+		t.Errorf("a Run function may have issued implicitly committing DDL: %v", err)
+	}
+	if !strings.Contains(err.Error(), "cannot see inside Run") {
+		t.Errorf("the report should explain Run's opacity: %v", err)
+	}
+}
+
+// WithoutTransaction on a transactional dialect runs under autocommit: the
+// failure report must name the committed prefix, exactly as the
+// no-transaction dialects do.
+func TestWithoutTransactionFailureNamesCommittedPrefix(t *testing.T) {
+	f := newFakeDB()
+	c := NewCollection()
+	c.Add("001_plain", func(s *Schema) {
+		s.Exec("INSERT INTO a (x) VALUES (1)")
+		s.Exec("INSERT INTO broken (x) VALUES (2)")
+	}, WithoutTransaction(), WithDown(func(s *Schema) {}))
+	f.fail("broken", errors.New("boom"))
+	err := testMigrator(t, f, MySQL, c).Up(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "declared WithoutTransaction") {
+		t.Fatalf("the report should explain autocommit, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "statement 1 is already applied") {
+		t.Errorf("the report should name the committed prefix, got: %v", err)
+	}
+}
+
 func TestRunFunctionExecutesInTransaction(t *testing.T) {
 	f := newFakeDB()
 	c := NewCollection()

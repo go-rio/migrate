@@ -158,6 +158,55 @@ func TestChecksumStableAndSensitive(t *testing.T) {
 	}
 }
 
+// The checksum encoding is injective: pointers dereference (never hashing an
+// address), value types distinguish, and statement boundaries cannot fold.
+func TestChecksumEncodingInjective(t *testing.T) {
+	sum := func(decl func(*Schema)) string {
+		t.Helper()
+		c := NewCollection()
+		c.Add("m", decl, WithDown(func(*Schema) {}))
+		s, err := c.get("m").checksum(Postgres)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// Pointer arguments hash like their values, so the checksum is stable
+	// across processes; a fresh pointer per call must not drift.
+	v := 42
+	p1 := sum(func(s *Schema) { s.Exec("UPDATE t SET x = ?", &v) })
+	w := 42
+	p2 := sum(func(s *Schema) { s.Exec("UPDATE t SET x = ?", &w) })
+	byVal := sum(func(s *Schema) { s.Exec("UPDATE t SET x = ?", 42) })
+	if p1 != p2 || p1 != byVal {
+		t.Error("pointer arguments must hash by value")
+	}
+
+	// Value types distinguish.
+	if sum(func(s *Schema) { s.Exec("UPDATE t SET x = ?", 1) }) ==
+		sum(func(s *Schema) { s.Exec("UPDATE t SET x = ?", "1") }) {
+		t.Error("1 and \"1\" must not collide")
+	}
+
+	// Statement boundaries cannot fold into argument bytes.
+	joined := sum(func(s *Schema) { s.Exec("A", "B") })
+	split := sum(func(s *Schema) { s.Exec("A"); s.Exec("B") })
+	if joined == split {
+		t.Error("statement boundaries must not collide with arguments")
+	}
+
+	// Types the encoding cannot pin down refuse loudly instead of drifting.
+	c := NewCollection()
+	c.Add("m", func(s *Schema) {
+		s.Exec("UPDATE t SET x = ?", struct{ X int }{1})
+	}, WithDown(func(*Schema) {}))
+	if _, err := c.get("m").checksum(Postgres); err == nil ||
+		!strings.Contains(err.Error(), "cannot checksum") {
+		t.Fatalf("struct arguments must refuse: %v", err)
+	}
+}
+
 func TestAddPanics(t *testing.T) {
 	cases := map[string]func(*Collection){
 		"empty name": func(c *Collection) { c.Add("", func(*Schema) {}) },
