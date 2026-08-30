@@ -124,11 +124,9 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 				return nil, fmt.Errorf("migrate: sqlite cannot add auto-increment column %q to existing table %q; declare it in Create, or use Schema.Recreate", c.col.name, op.table)
 			}
 			if c.col.generatedExpr != "" && !c.col.generatedVirtual {
-				// SQLite cannot add stored columns to populated tables.
 				return nil, fmt.Errorf("migrate: sqlite cannot add STORED generated column %q to existing table %q; use VirtualAs, or Schema.Recreate", c.col.name, op.table)
 			}
 			if c.col.useCurrent || c.col.defaultExpr != "" {
-				// Populated tables reject non-constant ADD COLUMN defaults.
 				return nil, fmt.Errorf("migrate: sqlite cannot add column %q with a non-constant default to existing table %q; use a literal Default, or Schema.Recreate", c.col.name, op.table)
 			}
 			clause, err := d.columnSQL(op.table, c.col)
@@ -244,7 +242,6 @@ func (sqliteDialect) typeSQL(c *columnDef) (string, error) {
 	}
 }
 
-// listTriggers reads replayable DDL from the table schema's sqlite_master.
 func (sqliteDialect) listTriggers(ctx context.Context, db DB, table string) ([]string, error) {
 	master := "sqlite_master"
 	if p := schemaPrefix(table); p != "" {

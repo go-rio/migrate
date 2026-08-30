@@ -122,10 +122,8 @@ func (s *Schema) Exec(query string, args ...any) {
 // transaction when the dialect provides one, or on the dedicated connection
 // otherwise. It is excluded from checksums and is irreversible.
 //
-// Keep DDL out of fn: rio cannot see inside the function, so on MySQL a DDL
-// statement would commit the transaction implicitly without appearing in the
-// failure report's committed-prefix accounting. Schema changes belong in the
-// declarative builders or Exec, which track that.
+// Keep DDL out of fn: rio cannot see inside it, so on MySQL DDL would commit
+// implicitly without appearing in failure reports. Use the builders or Exec.
 func (s *Schema) Run(fn func(ctx context.Context, db DB) error) {
 	if fn == nil {
 		s.errf("Run declares a nil function")

@@ -158,8 +158,6 @@ func TestChecksumStableAndSensitive(t *testing.T) {
 	}
 }
 
-// The checksum encoding is injective: pointers dereference (never hashing an
-// address), value types distinguish, and statement boundaries cannot fold.
 func TestChecksumEncodingInjective(t *testing.T) {
 	sum := func(decl func(*Schema)) string {
 		t.Helper()
@@ -172,8 +170,7 @@ func TestChecksumEncodingInjective(t *testing.T) {
 		return s
 	}
 
-	// Pointer arguments hash like their values, so the checksum is stable
-	// across processes; a fresh pointer per call must not drift.
+	// Pointers hash by value, so checksums are stable across processes.
 	v := 42
 	p1 := sum(func(s *Schema) { s.Exec("UPDATE t SET x = ?", &v) })
 	w := 42
@@ -183,7 +180,6 @@ func TestChecksumEncodingInjective(t *testing.T) {
 		t.Error("pointer arguments must hash by value")
 	}
 
-	// Value types distinguish.
 	if sum(func(s *Schema) { s.Exec("UPDATE t SET x = ?", 1) }) ==
 		sum(func(s *Schema) { s.Exec("UPDATE t SET x = ?", "1") }) {
 		t.Error("1 and \"1\" must not collide")

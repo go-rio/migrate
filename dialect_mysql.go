@@ -59,7 +59,6 @@ func (d mysqlDialect) compile(op operation) ([]statement, error) {
 	case *alterTable:
 		return d.compileAlter(o)
 	case *recreateTable:
-		// Recreate cannot be atomic on MySQL; use native ALTER TABLE instead.
 		return nil, fmt.Errorf("migrate: mysql cannot rebuild table %q atomically (DDL commits implicitly); use Schema.Table with native ALTER operations, or Exec", o.def.name)
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
@@ -309,7 +308,6 @@ func (mysqlDialect) unlock(ctx context.Context, conn *sql.Conn, token lockToken)
 
 func (mysqlDialect) quoteIdent(name string) string { return myQ.table(name) }
 
-// mysqlEscape handles MySQL single-quoted literals with backslash escapes.
 func mysqlEscape(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
 }

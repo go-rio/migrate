@@ -84,8 +84,7 @@ func TestExpressionIndex(t *testing.T) {
 		})
 	}
 
-	// Expressions render verbatim: a forced wrapper would swallow trailing
-	// key options like a PostgreSQL operator class.
+	// Expressions render verbatim; a forced wrapper would swallow trailing key options.
 	assertSQL(t, compileSchema(t, Postgres, lower), []string{
 		`CREATE UNIQUE INDEX "users_email_lower_unique" ON "users" (lower(email))`,
 	})

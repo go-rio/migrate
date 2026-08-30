@@ -111,8 +111,7 @@ func ExampleCollection_SQL() {
 	// CREATE UNIQUE INDEX "teams_name_unique" ON "teams" ("name");
 }
 
-// ClickHouse tables require an explicit storage engine and externally
-// serialized migration execution.
+// ClickHouse tables require an explicit storage engine.
 func Example_clickHouse() {
 	c := migrate.NewCollection()
 	c.Add("20260809100000_create_events", func(s *migrate.Schema) {

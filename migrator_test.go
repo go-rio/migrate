@@ -392,8 +392,7 @@ func TestMySQLMixedFailureNamesCommittedPrefix(t *testing.T) {
 	}
 }
 
-// A Run function is opaque — DDL inside it commits implicitly on MySQL — so
-// a failure report covering one must never claim the database is unchanged.
+// Run is opaque — its DDL may have committed — so the report must not claim MySQL unchanged.
 func TestMySQLRunFunctionFailureNeverClaimsUnchanged(t *testing.T) {
 	f := newFakeDB()
 	c := NewCollection()
@@ -414,9 +413,7 @@ func TestMySQLRunFunctionFailureNeverClaimsUnchanged(t *testing.T) {
 	}
 }
 
-// WithoutTransaction on a transactional dialect runs under autocommit: the
-// failure report must name the committed prefix, exactly as the
-// no-transaction dialects do.
+// WithoutTransaction runs under autocommit, so failures must name the committed prefix.
 func TestWithoutTransactionFailureNamesCommittedPrefix(t *testing.T) {
 	f := newFakeDB()
 	c := NewCollection()

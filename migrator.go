@@ -276,12 +276,10 @@ func (m *Migrator) prepareOne(mig *Migration, up bool, bookkeep statement) (prep
 	}
 	arbiter := -1
 	if mig.useTx && m.d.name() == "sqlite" {
-		// SQLite has no advisory lock, so the record statement runs first and
-		// arbitrates the race inside the transaction: up's INSERT hits the
-		// version UNIQUE key when another migrator already applied this
-		// migration, and down's DELETE affects zero rows when another already
-		// rolled it back. Either way the loser aborts before touching the
-		// schema.
+		// SQLite has no advisory lock; the record statement runs first and
+		// arbitrates races inside the transaction: a losing up hits the
+		// version UNIQUE key, a losing down deletes zero rows, and either
+		// aborts before touching the schema.
 		stmts = append([]statement{bookkeep}, stmts...)
 		arbiter = 0
 	} else {
@@ -316,9 +314,6 @@ func (m *Migrator) runPrepared(ctx context.Context, conn *sql.Conn, run prepared
 			if m.d.transactionMode() == transactionModeNone {
 				err = fmt.Errorf("%w (%s)", err, nonTransactionalNote(m.d.name(), failed, len(run.stmts)))
 			} else {
-				// The dialect has transactions; the migration declared
-				// WithoutTransaction, so every completed statement is already
-				// committed under autocommit.
 				err = fmt.Errorf("%w (%s)", err, withoutTxNote(failed, len(run.stmts)))
 			}
 		}
@@ -331,9 +326,8 @@ func (m *Migrator) runPrepared(ctx context.Context, conn *sql.Conn, run prepared
 	return nil
 }
 
-// runInTx applies one prepared migration inside a transaction. run.arbiter
-// identifies SQLite's record-first concurrency check; run.up decides which
-// loss signal applies (INSERT unique violation vs DELETE of zero rows).
+// runInTx maps arbiter failures (see prepareOne) onto concurrent-migrator
+// errors.
 func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, run preparedMigration) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -363,8 +357,7 @@ func (m *Migrator) runInTx(ctx context.Context, conn *sql.Conn, run preparedMigr
 	return nil
 }
 
-// recordFate says whether the trailing migration-record statement ran; the
-// three failure notes below share it verbatim.
+// recordFate says whether the trailing migration-record statement ran.
 func recordFate(failed, total int) string {
 	if failed == total-1 {
 		return "the final migration-record statement did not report success"
@@ -372,7 +365,6 @@ func recordFate(failed, total int) string {
 	return "the final migration-record statement was not reached"
 }
 
-// statementSpan pluralizes the completed statement prefix.
 func statementSpan(failed int) (span, verb string) {
 	if failed == 1 {
 		return "statement 1", "is"
@@ -380,9 +372,8 @@ func statementSpan(failed int) (span, verb string) {
 	return fmt.Sprintf("statements 1-%d", failed), "are"
 }
 
-// nonTransactionalNote describes the successfully executed prefix when a
-// dialect cannot put a migration inside one transaction. failed is the
-// zero-based failing statement.
+// nonTransactionalNote describes the executed prefix when the dialect has no
+// migration transaction. failed is the zero-based failing statement.
 func nonTransactionalNote(dialect string, failed, total int) string {
 	history := recordFate(failed, total)
 	if failed == 0 {
@@ -393,8 +384,7 @@ func nonTransactionalNote(dialect string, failed, total int) string {
 		dialect, span, history)
 }
 
-// withoutTxNote describes the committed prefix when a migration on a
-// transactional dialect declared WithoutTransaction: every statement ran
+// withoutTxNote describes the prefix a WithoutTransaction migration committed
 // under autocommit. failed is the zero-based failing statement.
 func withoutTxNote(failed, total int) string {
 	history := recordFate(failed, total)
@@ -421,9 +411,6 @@ func implicitCommitNote(dialect string, stmts []statement, failed int) string {
 	}
 	if !dirty || failed == 0 {
 		if goFn {
-			// A Run function is opaque: DDL inside it commits implicitly and
-			// invisibly. The report must never understate commits, so it
-			// cannot claim the database is unchanged.
 			return "the transaction rolled back; Go migration functions ran inside it and their DML rolled back too, but " + dialect + " commits DDL implicitly and rio cannot see inside Run — verify any DDL a function issued before retrying"
 		}
 		return "the transaction rolled back: the database is unchanged by this migration"

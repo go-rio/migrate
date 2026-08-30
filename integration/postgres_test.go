@@ -255,11 +255,7 @@ func TestPostgresRecreateReferencedParentFailsCleanly(t *testing.T) {
 	}
 }
 
-// Every expression-index shape PostgreSQL accepts must round-trip through
-// IndexExpr verbatim: bare function calls, an operator class trailing the
-// call (the part a forced wrapper used to swallow), caller-parenthesized
-// arithmetic, several expressions in one key list, a partial predicate, an
-// explicit method, and the unique form.
+// Every expression-index shape must round-trip through IndexExpr verbatim.
 func TestPostgresExpressionIndexes(t *testing.T) {
 	ctx := context.Background()
 	db := openPostgres(t)

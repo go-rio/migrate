@@ -33,10 +33,8 @@ type Dialect interface {
 
 type lockToken string
 
-// transactionMode describes the guarantees available to one migration. It is
-// deliberately more precise than a transactional-DDL boolean: MySQL protects
-// plain DML but commits DDL implicitly, while ClickHouse offers no
-// multi-statement migration transaction at all.
+// transactionMode is one migration's transactional guarantee: full, DML-only
+// (DDL commits implicitly, as on MySQL), or none (ClickHouse).
 type transactionMode uint8
 
 const (
@@ -105,7 +103,6 @@ func (q quoter) idents(names []string) string {
 	return strings.Join(quoted, ", ")
 }
 
-// table quotes each segment of a schema-qualified name.
 func (q quoter) table(name string) string {
 	segs := strings.Split(name, ".")
 	for i, s := range segs {
@@ -114,7 +111,6 @@ func (q quoter) table(name string) string {
 	return strings.Join(segs, ".")
 }
 
-// baseName strips schema qualification for conventional object names.
 func baseName(table string) string {
 	if i := strings.LastIndexByte(table, '.'); i >= 0 {
 		return table[i+1:]
@@ -278,11 +274,8 @@ func validateIndex(dialect, table string, idx *indexDef) error {
 	return nil
 }
 
-// indexItems renders the index key list. MySQL requires each functional key
-// part wrapped in its own parentheses; everywhere else expressions pass
-// verbatim — a forced wrapper would swallow what must stay outside the
-// parentheses, like a PostgreSQL operator class in
-// "lower(email) text_pattern_ops".
+// indexItems renders the key list. Only MySQL wraps each functional key part
+// in parentheses; elsewhere expressions pass verbatim (see IndexExpr).
 func indexItems(dialect string, q quoter, idx *indexDef) string {
 	if len(idx.exprs) == 0 {
 		return q.idents(idx.columns)
@@ -297,8 +290,6 @@ func indexItems(dialect string, q quoter, idx *indexDef) string {
 	return strings.Join(items, ", ")
 }
 
-// createIndexSQL handles dialect-specific schema qualification and index
-// method placement.
 func createIndexSQL(dialect string, q quoter, table string, idx *indexDef, schemaOnIndex bool) (string, error) {
 	if err := validateIndex(dialect, table, idx); err != nil {
 		return "", err
@@ -315,7 +306,6 @@ func createIndexSQL(dialect string, q quoter, table string, idx *indexDef, schem
 	}
 	concurrently := ""
 	if idx.concurrently && dialect == "postgres" {
-		// Only PostgreSQL needs an explicit online mode.
 		concurrently = "CONCURRENTLY "
 	}
 
@@ -372,7 +362,6 @@ func inlineIndexes(cols []*columnDef) []*indexDef {
 	return idxs
 }
 
-// primaryColumns prevents combining inline auto-increment and table keys.
 func primaryColumns(def *tableDef) ([]string, error) {
 	var inline bool
 	var cols []string
@@ -402,9 +391,8 @@ func declarationErrors(errs []error) error {
 	return fmt.Errorf("migrate: invalid declaration: %w", errors.Join(errs...))
 }
 
-// compileRecreate creates a temporary table, copies rows, swaps names, and
-// rebuilds indexes. It captures and restores live triggers because DROP TABLE
-// removes objects not represented by the builder.
+// compileRecreate copies rows into a temporary table and swaps names. Live
+// triggers are captured and restored: DROP TABLE would silently discard them.
 func compileRecreate(d Dialect, q quoter, schemaOnIndex bool, renameSQL func(from, to string) statement,
 	listTriggers func(context.Context, DB, string) ([]string, error), def *tableDef) ([]statement, error) {
 	tmp := def.name + "__migrate_new"

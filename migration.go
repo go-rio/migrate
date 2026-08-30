@@ -161,11 +161,7 @@ func validateSchema(name string, s *Schema) error {
 }
 
 // checksum covers compiled SQL and arguments, but not opaque Run functions.
-// The encoding is injective: every part is type-tagged and length-prefixed,
-// so neither statement boundaries nor value types can collide — "A" with
-// argument "B" never hashes like plain "A" then "B", and 1 never hashes like
-// "1". Pointer arguments dereference, exactly as driver execution does, so a
-// checksum never captures an address and stays stable across processes.
+// The encoding is injective (type-tagged, length-prefixed) and pointer-free.
 func (m *Migration) checksum(d Dialect) (string, error) {
 	stmts, err := m.compile(d, true)
 	if err != nil {
@@ -187,9 +183,8 @@ func (m *Migration) checksum(d Dialect) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// checksumArg writes one argument's canonical form. Unsupported types are an
-// error rather than a lossy fallback: a value the encoding cannot pin down
-// would make drift detection lie in one direction or the other.
+// checksumArg writes one argument's canonical form; unsupported types fail
+// rather than hash lossily.
 func checksumArg(h io.Writer, s statement, a any) error {
 	if a == nil {
 		_, _ = io.WriteString(h, "n")

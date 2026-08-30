@@ -91,9 +91,7 @@ func TestSQLiteConcurrentMigrators(t *testing.T) {
 	}
 }
 
-// Rollback gets the same record-first arbitration as Up: the down statements
-// of a lost race must never run twice — a data-restoring down applied twice
-// would corrupt, and even an idempotent one must lose loudly.
+// Record-first arbitration must keep a lost race from running the down twice.
 func TestSQLiteConcurrentRollback(t *testing.T) {
 	ctx := context.Background()
 	dsn := "file:" + filepath.Join(t.TempDir(), "app.db") + "?_pragma=busy_timeout(5000)"
@@ -150,8 +148,7 @@ func TestSQLiteConcurrentRollback(t *testing.T) {
 			t.Errorf("racer %d leaked a raw race error: %v", i, err)
 		}
 	}
-	// Losers that started after the winner deleted the record see an empty
-	// state and no-op; losers racing inside the window lose on the arbiter.
+	// Late losers see the record already gone and no-op, so several may succeed.
 	if winners == 0 {
 		t.Error("at least one racer must win")
 	}

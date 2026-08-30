@@ -1,6 +1,5 @@
-// Package integration exercises migrate against live databases.
-// SQLite always runs; Postgres, MySQL, and ClickHouse run when their DSNs are
-// configured.
+// Package integration exercises migrate against live databases; SQLite always
+// runs, the others need their DSN env vars.
 package integration
 
 import (
