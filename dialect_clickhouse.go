@@ -66,17 +66,12 @@ func (d clickHouseDialect) compile(op operation) ([]statement, error) {
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
 		return []statement{{fn: o.fn}}, nil
-	case *createPartition, *attachPartition, *detachPartition:
-		return nil, errPartitioning("clickhouse")
 	default:
 		return nil, fmt.Errorf("migrate: clickhouse: unsupported operation %T", op)
 	}
 }
 
 func (d clickHouseDialect) compileCreate(def *tableDef) ([]statement, error) {
-	if def.partition != nil {
-		return nil, errPartitioning("clickhouse")
-	}
 	if !def.clickHouseEngineSet {
 		return nil, fmt.Errorf("migrate: clickhouse table %q requires ClickHouseEngine with an explicit engine and sorting key, for example ClickHouseEngine(\"MergeTree() ORDER BY (tenant_id, occurred_at)\")", def.name)
 	}

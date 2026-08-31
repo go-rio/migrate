@@ -109,43 +109,6 @@ func (s *Schema) DropIfExists(table string) {
 	s.record(&dropTable{name: table, ifExists: true})
 }
 
-// CreatePartition creates a child of a partitioned parent; rollback drops
-// it. PostgreSQL only.
-func (s *Schema) CreatePartition(child, parent string, bound PartitionBound) {
-	s.requireTable("CreatePartition", child)
-	s.requireTable("CreatePartition", parent)
-	if bound.kind == "" {
-		s.errf("CreatePartition(%q) needs a bound; use CreateDefaultPartition for the default partition", child)
-	}
-	s.record(&createPartition{child: child, parent: parent, bound: &bound})
-}
-
-// CreateDefaultPartition creates the DEFAULT partition; rollback drops it.
-func (s *Schema) CreateDefaultPartition(child, parent string) {
-	s.requireTable("CreateDefaultPartition", child)
-	s.requireTable("CreateDefaultPartition", parent)
-	s.record(&createPartition{child: child, parent: parent})
-}
-
-// AttachPartition attaches an existing table as a partition; rollback
-// detaches it.
-func (s *Schema) AttachPartition(parent, child string, bound PartitionBound) {
-	s.requireTable("AttachPartition", parent)
-	s.requireTable("AttachPartition", child)
-	if bound.kind == "" {
-		s.errf("AttachPartition(%q) needs a bound", child)
-	}
-	s.record(&attachPartition{parent: parent, child: child, bound: &bound})
-}
-
-// DetachPartition detaches a partition into a standalone table; the bound
-// is discarded, so it is irreversible without WithDown.
-func (s *Schema) DetachPartition(parent, child string) {
-	s.requireTable("DetachPartition", parent)
-	s.requireTable("DetachPartition", child)
-	s.record(&detachPartition{parent: parent, child: child})
-}
-
 // Exec records raw SQL in plans and checksums. It is irreversible without
 // WithDown and uses native dialect placeholders.
 func (s *Schema) Exec(query string, args ...any) {

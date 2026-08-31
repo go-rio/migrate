@@ -254,38 +254,6 @@ func (t *Table) IndexExpr(name string, exprs ...string) *Index {
 	return t.exprIndex(name, exprs, false)
 }
 
-// PartitionByRange declares a PostgreSQL range-partitioned parent; add
-// children with Schema.CreatePartition. Create-only; the PK must include
-// the partition key.
-func (t *Table) PartitionByRange(columns ...string) {
-	t.partitionBy("RANGE", columns)
-}
-
-// PartitionByList declares a list-partitioned parent (see PartitionByRange).
-func (t *Table) PartitionByList(columns ...string) {
-	t.partitionBy("LIST", columns)
-}
-
-// PartitionByHash declares a hash-partitioned parent (see PartitionByRange).
-func (t *Table) PartitionByHash(columns ...string) {
-	t.partitionBy("HASH", columns)
-}
-
-func (t *Table) partitionBy(method string, columns []string) {
-	label := map[string]string{"RANGE": "PartitionByRange", "LIST": "PartitionByList", "HASH": "PartitionByHash"}[method]
-	if t.create == nil {
-		t.errf("%s is only valid inside Schema.Create (table %q)", label, t.table)
-		return
-	}
-	if len(columns) == 0 {
-		t.errf("%s on table %q declares no columns", label, t.table)
-	}
-	if t.create.partition != nil {
-		t.errf("table %q declares two partitioning methods", t.table)
-	}
-	t.create.partition = &partitionBy{method: method, columns: columns}
-}
-
 // UniqueConstraint declares a named table-level UNIQUE constraint — the
 // form ON CONFLICT ON CONSTRAINT can reference, unlike Unique's index.
 // SQLite supports it in Create only; alter via Schema.Recreate.

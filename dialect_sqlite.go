@@ -70,8 +70,6 @@ func (d sqliteDialect) compile(op operation) ([]statement, error) {
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
 		return []statement{{fn: o.fn}}, nil
-	case *createPartition, *attachPartition, *detachPartition:
-		return nil, errPartitioning("sqlite")
 	default:
 		return nil, fmt.Errorf("migrate: sqlite: unsupported operation %T", op)
 	}
@@ -82,9 +80,6 @@ func (d sqliteDialect) compileCreate(def *tableDef) ([]statement, error) {
 		if c.inlinePrimary() && slices.Contains(def.primary, c.name) {
 			return nil, fmt.Errorf("migrate: sqlite cannot combine AUTOINCREMENT column %q with a composite primary key on table %q; the rowid alias must be the sole primary key", c.name, def.name)
 		}
-	}
-	if def.partition != nil {
-		return nil, errPartitioning("sqlite")
 	}
 	pk, err := primaryColumns(def)
 	if err != nil {

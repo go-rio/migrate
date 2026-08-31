@@ -156,25 +156,6 @@ Inline in `Create`, `ADD CONSTRAINT` in `Table` (MySQL `DROP CONSTRAINT`
 needs 8.0.19+). SQLite alters via `Recreate`, which keeps the name. Partial
 and expression uniqueness stay indexes.
 
-### Partitioning (PostgreSQL)
-
-```go
-s.Create("inventory_log", func(t *migrate.Table) {
-    t.BigInteger("id").AutoIncrement()
-    t.TimestampTz("event_at")
-    t.Primary("id", "event_at") // must include the partition key
-    t.PartitionByRange("event_at") // or PartitionByList / PartitionByHash
-})
-s.CreatePartition("inventory_log_202609", "inventory_log",
-    migrate.ForValuesFromTo("2026-09-01", "2026-10-01")) // or ForValuesIn / ForValuesWith
-s.CreateDefaultPartition("inventory_log_default", "inventory_log")
-s.AttachPartition("inventory_log", "old_rows", migrate.ForValuesFromTo(a, b))
-s.DetachPartition("inventory_log", "inventory_log_202609") // irreversible
-```
-
-PostgreSQL-only; other dialects reject it. Create and attach reverse
-automatically. SQLite rejects identity inside a composite key.
-
 ## Altering tables
 
 ```go

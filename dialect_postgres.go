@@ -67,23 +67,6 @@ func (d postgresDialect) compile(op operation) ([]statement, error) {
 			return nil, err
 		}
 		return append(stmts, d.recreateEpilogue(o.def)...), nil
-	case *createPartition:
-		bound, err := partitionBoundSQL(o.bound)
-		if err != nil {
-			return nil, err
-		}
-		return []statement{sqlStatement("CREATE TABLE %s PARTITION OF %s %s",
-			pgQ.table(o.child), pgQ.table(o.parent), bound)}, nil
-	case *attachPartition:
-		bound, err := partitionBoundSQL(o.bound)
-		if err != nil {
-			return nil, err
-		}
-		return []statement{sqlStatement("ALTER TABLE %s ATTACH PARTITION %s %s",
-			pgQ.table(o.parent), pgQ.table(o.child), bound)}, nil
-	case *detachPartition:
-		return []statement{sqlStatement("ALTER TABLE %s DETACH PARTITION %s",
-			pgQ.table(o.parent), pgQ.table(o.child))}, nil
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
@@ -138,12 +121,8 @@ func (d postgresDialect) compileCreate(def *tableDef) ([]statement, error) {
 		clauses = append(clauses, foreignClause(pgQ, def.constraintTable(), fk))
 	}
 
-	partition := ""
-	if def.partition != nil {
-		partition = fmt.Sprintf(" PARTITION BY %s (%s)", def.partition.method, pgQ.idents(def.partition.columns))
-	}
-	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)%s",
-		pgQ.table(def.name), strings.Join(clauses, ",\n\t"), partition)}
+	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)",
+		pgQ.table(def.name), strings.Join(clauses, ",\n\t"))}
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
 		sql, err := createIndexSQL("postgres", pgQ, def.name, idx, false)
 		if err != nil {

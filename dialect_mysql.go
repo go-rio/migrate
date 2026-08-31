@@ -64,8 +64,6 @@ func (d mysqlDialect) compile(op operation) ([]statement, error) {
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
 		return []statement{{fn: o.fn}}, nil
-	case *createPartition, *attachPartition, *detachPartition:
-		return nil, errPartitioning("mysql")
 	default:
 		return nil, fmt.Errorf("migrate: mysql: unsupported operation %T", op)
 	}
@@ -73,9 +71,6 @@ func (d mysqlDialect) compile(op operation) ([]statement, error) {
 
 func (d mysqlDialect) compileCreate(def *tableDef) ([]statement, error) {
 	def = resolveCompositeIdentity(def)
-	if def.partition != nil {
-		return nil, errPartitioning("mysql")
-	}
 	pk, err := primaryColumns(def)
 	if err != nil {
 		return nil, err
