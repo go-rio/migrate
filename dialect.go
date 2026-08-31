@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -181,6 +182,55 @@ func generatedClause(c *columnDef) string {
 
 func checkClause(q quoter, chk *checkDef) string {
 	return fmt.Sprintf("CONSTRAINT %s CHECK (%s)", q.ident(chk.name), chk.expr)
+}
+
+// errPartitioning rejects declarative partitioning outside PostgreSQL.
+func errPartitioning(dialect string) error {
+	hint := "declarative partitioning is PostgreSQL-only"
+	switch dialect {
+	case "mysql":
+		hint += "; use Exec with MySQL's own PARTITION BY syntax"
+	case "clickhouse":
+		hint += "; partition through ClickHouseEngine's PARTITION BY instead"
+	}
+	return fmt.Errorf("migrate: %s: %s", dialect, hint)
+}
+
+// partitionBoundSQL renders a child's FOR VALUES clause, or DEFAULT.
+func partitionBoundSQL(b *PartitionBound) (string, error) {
+	if b == nil {
+		return "DEFAULT", nil
+	}
+	switch b.kind {
+	case "range":
+		from, err := literal(b.from, false)
+		if err != nil {
+			return "", err
+		}
+		to, err := literal(b.to, false)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("FOR VALUES FROM (%s) TO (%s)", from, to), nil
+	case "list":
+		vals := make([]string, len(b.in))
+		for i, v := range b.in {
+			lit, err := literal(v, false)
+			if err != nil {
+				return "", err
+			}
+			vals[i] = lit
+		}
+		return "FOR VALUES IN (" + strings.Join(vals, ", ") + ")", nil
+	case "hash":
+		return fmt.Sprintf("FOR VALUES WITH (MODULUS %d, REMAINDER %d)", b.modulus, b.remainder), nil
+	default:
+		return "", fmt.Errorf("migrate: invalid partition bound")
+	}
+}
+
+func uniqueConstraintClause(q quoter, uc *uniqueConstraintDef) string {
+	return fmt.Sprintf("CONSTRAINT %s UNIQUE (%s)", q.ident(uc.name), q.idents(uc.columns))
 }
 
 func defaultValueSQL(c *columnDef, backslashEscapes bool, currentTS string) (string, error) {
@@ -362,6 +412,24 @@ func inlineIndexes(cols []*columnDef) []*indexDef {
 	return idxs
 }
 
+// resolveCompositeIdentity lets a table-level Primary include the
+// auto-incrementing column — partitioned parents need the composite form.
+// The column keeps its identity but stops rendering an inline PRIMARY KEY;
+// def is copied, never mutated (declarations replay).
+func resolveCompositeIdentity(def *tableDef) *tableDef {
+	for i, c := range def.columns {
+		if c.inlinePrimary() && slices.Contains(def.primary, c.name) {
+			out := *def
+			out.columns = slices.Clone(def.columns)
+			cc := *c
+			cc.primary = false
+			out.columns[i] = &cc
+			return &out
+		}
+	}
+	return def
+}
+
 func primaryColumns(def *tableDef) ([]string, error) {
 	var inline bool
 	var cols []string
@@ -401,6 +469,7 @@ func compileRecreate(d Dialect, q quoter, schemaOnIndex bool, renameSQL func(fro
 		constraintBase: def.name,
 		primary:        def.primary,
 		checks:         def.checks,
+		uniques:        def.uniques,
 		comment:        def.comment,
 	}
 	for _, c := range def.columns {

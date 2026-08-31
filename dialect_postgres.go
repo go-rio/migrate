@@ -67,6 +67,23 @@ func (d postgresDialect) compile(op operation) ([]statement, error) {
 			return nil, err
 		}
 		return append(stmts, d.recreateEpilogue(o.def)...), nil
+	case *createPartition:
+		bound, err := partitionBoundSQL(o.bound)
+		if err != nil {
+			return nil, err
+		}
+		return []statement{sqlStatement("CREATE TABLE %s PARTITION OF %s %s",
+			pgQ.table(o.child), pgQ.table(o.parent), bound)}, nil
+	case *attachPartition:
+		bound, err := partitionBoundSQL(o.bound)
+		if err != nil {
+			return nil, err
+		}
+		return []statement{sqlStatement("ALTER TABLE %s ATTACH PARTITION %s %s",
+			pgQ.table(o.parent), pgQ.table(o.child), bound)}, nil
+	case *detachPartition:
+		return []statement{sqlStatement("ALTER TABLE %s DETACH PARTITION %s",
+			pgQ.table(o.parent), pgQ.table(o.child))}, nil
 	case *rawSQL:
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
@@ -77,6 +94,7 @@ func (d postgresDialect) compile(op operation) ([]statement, error) {
 }
 
 func (d postgresDialect) compileCreate(def *tableDef) ([]statement, error) {
+	def = resolveCompositeIdentity(def)
 	pk, err := primaryColumns(def)
 	if err != nil {
 		return nil, err
@@ -106,12 +124,26 @@ func (d postgresDialect) compileCreate(def *tableDef) ([]statement, error) {
 	for _, chk := range def.checks {
 		clauses = append(clauses, checkClause(pgQ, chk))
 	}
+	for _, uc := range def.uniques {
+		if def.constraintBase != "" {
+			// The live table still owns the backing index under the real
+			// name; the epilogue renames this deterministic temporary.
+			tmpUC := &uniqueConstraintDef{name: uc.name + "__migrate_new", columns: uc.columns}
+			clauses = append(clauses, uniqueConstraintClause(pgQ, tmpUC))
+			continue
+		}
+		clauses = append(clauses, uniqueConstraintClause(pgQ, uc))
+	}
 	for _, fk := range def.fks {
 		clauses = append(clauses, foreignClause(pgQ, def.constraintTable(), fk))
 	}
 
-	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)",
-		pgQ.table(def.name), strings.Join(clauses, ",\n\t"))}
+	partition := ""
+	if def.partition != nil {
+		partition = fmt.Sprintf(" PARTITION BY %s (%s)", def.partition.method, pgQ.idents(def.partition.columns))
+	}
+	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)%s",
+		pgQ.table(def.name), strings.Join(clauses, ",\n\t"), partition)}
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
 		sql, err := createIndexSQL("postgres", pgQ, def.name, idx, false)
 		if err != nil {
@@ -189,6 +221,10 @@ func (d postgresDialect) compileAlter(op *alterTable) ([]statement, error) {
 		case *addCheck:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD %s", table, checkClause(pgQ, c.chk)))
 		case *dropCheck:
+			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP CONSTRAINT %s", table, pgQ.ident(c.name)))
+		case *addUniqueConstraint:
+			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD %s", table, uniqueConstraintClause(pgQ, c.uc)))
+		case *dropConstraint:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP CONSTRAINT %s", table, pgQ.ident(c.name)))
 		default:
 			return nil, fmt.Errorf("migrate: postgres: unsupported change %T", ch)
@@ -342,6 +378,10 @@ func (d postgresDialect) recreateEpilogue(def *tableDef) []statement {
 		tmpPkey := baseName(def.name) + "__migrate_new_pkey"
 		stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME CONSTRAINT %s TO %s",
 			pgQ.table(def.name), pgQ.ident(tmpPkey), pgQ.ident(primaryName(def.name))))
+	}
+	for _, uc := range def.uniques {
+		stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME CONSTRAINT %s TO %s",
+			pgQ.table(def.name), pgQ.ident(uc.name+"__migrate_new"), pgQ.ident(uc.name)))
 	}
 	for _, c := range def.columns {
 		if !c.inlinePrimary() || c.skipCopy {

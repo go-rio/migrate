@@ -39,6 +39,14 @@ func analyzeSafety(dialect string, ops []operation) []string {
 	}
 	for _, op := range ops {
 		switch o := op.(type) {
+		case *attachPartition:
+			if dialect == "postgres" {
+				warn("attaching partition %q scans it to validate the bound while holding locks on %q; pre-create a matching CHECK constraint to skip the scan on a large table", o.child, o.parent)
+			}
+		case *detachPartition:
+			if dialect == "postgres" {
+				warn("detaching partition %q takes an ACCESS EXCLUSIVE lock on %q; on a busy parent use Exec with DETACH PARTITION ... CONCURRENTLY on a WithoutTransaction migration", o.child, o.parent)
+			}
 		case *recreateTable:
 			warn("recreating table %q copies every row while holding locks and recreates its triggers as captured; plan for the copy time on large tables, check the trigger bodies still match the new shape, and note that a table referenced by foreign keys or views cannot be recreated on Postgres", o.def.name)
 		case *dropTable:
@@ -79,7 +87,11 @@ func analyzeSafety(dialect string, ops []operation) []string {
 					}
 				case *addPrimary:
 					warn("adding a primary key to existing table %q rewrites the table under lock on most engines", o.table)
-				case *addCheck:
+				case *addUniqueConstraint:
+				if dialect == "postgres" {
+					warn("adding unique constraint %q builds its index while blocking writes to %q; on a large table CREATE UNIQUE INDEX CONCURRENTLY via Exec on a WithoutTransaction migration, then ADD CONSTRAINT ... USING INDEX", c.uc.name, o.table)
+				}
+			case *addCheck:
 					switch dialect {
 					case "postgres":
 						warn("adding check constraint %q validates every row of %q under lock; on a large table add it NOT VALID via Exec, then VALIDATE CONSTRAINT separately", c.chk.name, o.table)

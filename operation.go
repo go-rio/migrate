@@ -128,6 +128,13 @@ type checkDef struct {
 	expr string
 }
 
+// uniqueConstraintDef is a named table-level UNIQUE constraint — the form ON
+// CONFLICT ON CONSTRAINT can reference, unlike a unique index.
+type uniqueConstraintDef struct {
+	name    string
+	columns []string
+}
+
 type foreignDef struct {
 	name       string // empty means the conventional name
 	columns    []string
@@ -137,12 +144,20 @@ type foreignDef struct {
 	onUpdate   string
 }
 
+// partitionBy is a PostgreSQL declarative partitioning clause on a parent.
+type partitionBy struct {
+	method  string // RANGE, LIST, HASH
+	columns []string
+}
+
 type tableDef struct {
 	name                string
 	columns             []*columnDef
 	indexes             []*indexDef
 	checks              []*checkDef
+	uniques             []*uniqueConstraintDef
 	fks                 []*foreignDef
+	partition           *partitionBy
 	primary             []string // composite primary key columns
 	comment             string
 	clickHouseEngine    string
@@ -237,6 +252,59 @@ type recreateTable struct {
 
 func (o *recreateTable) inverse() (operation, error) {
 	return nil, irreversible("recreating table %q discards its previous definition", o.def.name)
+}
+
+// PartitionBound places one child under a partitioned parent. Construct it
+// with ForValuesFromTo, ForValuesIn, or ForValuesWith; the zero value is
+// invalid (CreateDefaultPartition covers DEFAULT).
+type PartitionBound struct {
+	kind      string // "range", "list", "hash"
+	from, to  any
+	in        []any
+	modulus   int
+	remainder int
+}
+
+// ForValuesFromTo bounds a RANGE partition: FOR VALUES FROM (from) TO (to).
+// Values render as SQL literals.
+func ForValuesFromTo(from, to any) PartitionBound {
+	return PartitionBound{kind: "range", from: from, to: to}
+}
+
+// ForValuesIn bounds a LIST partition: FOR VALUES IN (values...).
+func ForValuesIn(values ...any) PartitionBound {
+	return PartitionBound{kind: "list", in: values}
+}
+
+// ForValuesWith bounds a HASH partition: FOR VALUES WITH (MODULUS m, REMAINDER r).
+func ForValuesWith(modulus, remainder int) PartitionBound {
+	return PartitionBound{kind: "hash", modulus: modulus, remainder: remainder}
+}
+
+type createPartition struct {
+	child, parent string
+	bound         *PartitionBound // nil renders DEFAULT
+}
+
+func (o *createPartition) inverse() (operation, error) {
+	return &dropTable{name: o.child}, nil
+}
+
+type attachPartition struct {
+	parent, child string
+	bound         *PartitionBound // nil attaches DEFAULT
+}
+
+func (o *attachPartition) inverse() (operation, error) {
+	return &detachPartition{parent: o.parent, child: o.child}, nil
+}
+
+type detachPartition struct {
+	parent, child string
+}
+
+func (o *detachPartition) inverse() (operation, error) {
+	return nil, irreversible("detaching partition %q of %q discards its bound; declare an explicit down with WithDown", o.child, o.parent)
 }
 
 type rawSQL struct {
@@ -339,6 +407,23 @@ type dropPrimary struct{}
 
 func (c *dropPrimary) inverseChange(table string) ([]change, error) {
 	return nil, irreversible("dropping the primary key of table %q discards its definition", table)
+}
+
+type addUniqueConstraint struct {
+	uc *uniqueConstraintDef
+}
+
+func (c *addUniqueConstraint) inverseChange(string) ([]change, error) {
+	return []change{&dropConstraint{name: c.uc.name}}, nil
+}
+
+// dropConstraint drops any named table constraint by name.
+type dropConstraint struct {
+	name string
+}
+
+func (c *dropConstraint) inverseChange(table string) ([]change, error) {
+	return nil, irreversible("dropping constraint %q of table %q discards its definition", c.name, table)
 }
 
 type addCheck struct {

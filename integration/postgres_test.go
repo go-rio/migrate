@@ -326,3 +326,141 @@ func TestPostgresExpressionIndexes(t *testing.T) {
 		t.Fatal("unique expression index did not enforce lower(email) uniqueness")
 	}
 }
+
+// A named unique constraint must be referenceable by ON CONFLICT ON
+// CONSTRAINT — the reason it exists instead of a unique index — and must
+// survive Schema.Recreate under its name.
+func TestPostgresUniqueConstraint(t *testing.T) {
+	ctx := context.Background()
+	db := openPostgres(t)
+	dropAll(t, db)
+	mustExec(t, db, "DROP TABLE IF EXISTS uc_items")
+
+	c := migrate.NewCollection()
+	c.Add("20260831010000_uc_create", func(s *migrate.Schema) {
+		s.Create("uc_items", func(tb *migrate.Table) {
+			tb.ID()
+			tb.BigInteger("owner_id")
+			tb.String("client_ref")
+			tb.Integer("qty")
+			tb.UniqueConstraint("uk_uc_items_owner_ref", "owner_id", "client_ref")
+		})
+	})
+	m, err := migrate.New(db, migrate.Postgres, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	t.Cleanup(func() { mustExec(t, db, "DROP TABLE IF EXISTS uc_items") })
+
+	upsert := `INSERT INTO uc_items (owner_id, client_ref, qty) VALUES ($1, $2, $3)
+		ON CONFLICT ON CONSTRAINT uk_uc_items_owner_ref DO UPDATE SET qty = EXCLUDED.qty`
+	mustExec(t, db, "INSERT INTO uc_items (owner_id, client_ref, qty) VALUES (1, 'r1', 5)")
+	if _, err := db.Exec(upsert, 1, "r1", 9); err != nil {
+		t.Fatalf("ON CONFLICT ON CONSTRAINT must accept the declared name: %v", err)
+	}
+	if got := count(t, db, "SELECT qty FROM uc_items WHERE owner_id = 1"); got != 9 {
+		t.Fatalf("conflict update lost: qty = %d", got)
+	}
+
+	c2 := migrate.NewCollection()
+	c2.Add("20260831010001_uc_recreate", func(s *migrate.Schema) {
+		s.Recreate("uc_items", func(tb *migrate.Table) {
+			tb.ID()
+			tb.BigInteger("owner_id")
+			tb.String("client_ref")
+			tb.Integer("qty")
+			tb.Text("note").Nullable().SkipCopy()
+			tb.UniqueConstraint("uk_uc_items_owner_ref", "owner_id", "client_ref")
+		})
+	}, migrate.Assured())
+	m2, err := migrate.New(db, migrate.Postgres, migrate.WithCollection(c2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.Up(ctx); err != nil {
+		t.Fatalf("Recreate: %v", err)
+	}
+	if _, err := db.Exec(upsert, 1, "r1", 12); err != nil {
+		t.Fatalf("the recreated constraint must keep its name: %v", err)
+	}
+	if got := count(t, db, "SELECT qty FROM uc_items WHERE owner_id = 1"); got != 12 {
+		t.Fatalf("post-recreate conflict update lost: qty = %d", got)
+	}
+}
+
+// The partition builder must produce a working partitioned family: rows
+// route to their range children, the default partition catches strays, and
+// attach/detach round-trip.
+func TestPostgresPartitioning(t *testing.T) {
+	ctx := context.Background()
+	db := openPostgres(t)
+	dropAll(t, db)
+	for _, tb := range []string{"pt_log_202609", "pt_log_202610", "pt_log_default", "pt_log"} {
+		mustExec(t, db, "DROP TABLE IF EXISTS "+tb)
+	}
+
+	c := migrate.NewCollection()
+	c.Add("20260831020000_partitioned_log", func(s *migrate.Schema) {
+		s.Create("pt_log", func(tb *migrate.Table) {
+			tb.BigInteger("id").AutoIncrement()
+			tb.TimestampTz("event_at")
+			tb.Text("event")
+			tb.Primary("id", "event_at")
+			tb.PartitionByRange("event_at")
+		})
+		s.CreatePartition("pt_log_202609", "pt_log", migrate.ForValuesFromTo("2026-09-01", "2026-10-01"))
+		s.CreateDefaultPartition("pt_log_default", "pt_log")
+	})
+	m, err := migrate.New(db, migrate.Postgres, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(ctx); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, tb := range []string{"pt_log_202610", "pt_log"} {
+			mustExec(t, db, "DROP TABLE IF EXISTS "+tb)
+		}
+	})
+
+	mustExec(t, db, "INSERT INTO pt_log (event_at, event) VALUES ('2026-09-15', 'in-range')")
+	mustExec(t, db, "INSERT INTO pt_log (event_at, event) VALUES ('2027-01-01', 'stray')")
+	if got := count(t, db, "SELECT COUNT(*) FROM pt_log_202609"); got != 1 {
+		t.Fatalf("range child rows = %d, want 1", got)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM pt_log_default"); got != 1 {
+		t.Fatalf("default child rows = %d, want 1", got)
+	}
+
+	c2 := migrate.NewCollection()
+	c2.Add("20260831020001_attach_detach", func(s *migrate.Schema) {
+		s.Exec(`CREATE TABLE pt_log_202610 (LIKE pt_log INCLUDING ALL EXCLUDING IDENTITY)`)
+		s.AttachPartition("pt_log", "pt_log_202610", migrate.ForValuesFromTo("2026-10-01", "2026-11-01"))
+		s.DetachPartition("pt_log", "pt_log_202609")
+	}, migrate.WithDown(func(s *migrate.Schema) {
+		s.AttachPartition("pt_log", "pt_log_202609", migrate.ForValuesFromTo("2026-09-01", "2026-10-01"))
+		s.DetachPartition("pt_log", "pt_log_202610")
+		s.Drop("pt_log_202610")
+	}))
+	m2, err := migrate.New(db, migrate.Postgres, migrate.WithCollection(c2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m2.Up(ctx); err != nil {
+		t.Fatalf("attach/detach Up: %v", err)
+	}
+	mustExec(t, db, "INSERT INTO pt_log (event_at, event) VALUES ('2026-10-05', 'oct')")
+	if got := count(t, db, "SELECT COUNT(*) FROM pt_log_202610"); got != 1 {
+		t.Fatalf("attached child rows = %d, want 1", got)
+	}
+	if err := m2.Rollback(ctx, 1); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM pt_log_202609"); got != 1 {
+		t.Fatalf("re-attached child rows = %d, want 1", got)
+	}
+}

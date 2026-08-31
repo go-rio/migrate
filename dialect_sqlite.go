@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -69,12 +70,22 @@ func (d sqliteDialect) compile(op operation) ([]statement, error) {
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
 		return []statement{{fn: o.fn}}, nil
+	case *createPartition, *attachPartition, *detachPartition:
+		return nil, errPartitioning("sqlite")
 	default:
 		return nil, fmt.Errorf("migrate: sqlite: unsupported operation %T", op)
 	}
 }
 
 func (d sqliteDialect) compileCreate(def *tableDef) ([]statement, error) {
+	for _, c := range def.columns {
+		if c.inlinePrimary() && slices.Contains(def.primary, c.name) {
+			return nil, fmt.Errorf("migrate: sqlite cannot combine AUTOINCREMENT column %q with a composite primary key on table %q; the rowid alias must be the sole primary key", c.name, def.name)
+		}
+	}
+	if def.partition != nil {
+		return nil, errPartitioning("sqlite")
+	}
 	pk, err := primaryColumns(def)
 	if err != nil {
 		return nil, err
@@ -94,6 +105,9 @@ func (d sqliteDialect) compileCreate(def *tableDef) ([]statement, error) {
 	}
 	for _, chk := range def.checks {
 		clauses = append(clauses, checkClause(liteQ, chk))
+	}
+	for _, uc := range def.uniques {
+		clauses = append(clauses, uniqueConstraintClause(liteQ, uc))
 	}
 	for _, fk := range def.fks {
 		clauses = append(clauses, foreignClause(liteQ, def.constraintTable(), fk))
@@ -157,6 +171,10 @@ func (d sqliteDialect) compileAlter(op *alterTable) ([]statement, error) {
 			return nil, fmt.Errorf("migrate: sqlite cannot rename index %q; drop it and declare a new one", c.from)
 		case *setTableComment:
 			// SQLite has no table comments.
+		case *addUniqueConstraint:
+			return nil, fmt.Errorf("migrate: sqlite cannot add a unique constraint to existing table %q; declare it in Create, or use Schema.Recreate", op.table)
+		case *dropConstraint:
+			return nil, fmt.Errorf("migrate: sqlite cannot drop constraint %q from table %q; use Schema.Recreate", c.name, op.table)
 		case *addCheck:
 			return nil, fmt.Errorf("migrate: sqlite cannot add a check constraint to existing table %q; declare it in Create, or use Schema.Recreate", op.table)
 		case *dropCheck:

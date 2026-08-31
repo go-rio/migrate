@@ -254,6 +254,75 @@ func (t *Table) IndexExpr(name string, exprs ...string) *Index {
 	return t.exprIndex(name, exprs, false)
 }
 
+// PartitionByRange declares the table as a PostgreSQL range-partitioned
+// parent. The parent stores no rows itself; add children with
+// Schema.CreatePartition. PostgreSQL requires every PK and unique constraint
+// to include the partition key. Only valid inside Schema.Create; other
+// dialects reject it (ClickHouse partitions via ClickHouseEngine).
+func (t *Table) PartitionByRange(columns ...string) {
+	t.partitionBy("RANGE", columns)
+}
+
+// PartitionByList declares a list-partitioned parent (see PartitionByRange).
+func (t *Table) PartitionByList(columns ...string) {
+	t.partitionBy("LIST", columns)
+}
+
+// PartitionByHash declares a hash-partitioned parent (see PartitionByRange).
+func (t *Table) PartitionByHash(columns ...string) {
+	t.partitionBy("HASH", columns)
+}
+
+func (t *Table) partitionBy(method string, columns []string) {
+	label := map[string]string{"RANGE": "PartitionByRange", "LIST": "PartitionByList", "HASH": "PartitionByHash"}[method]
+	if t.create == nil {
+		t.errf("%s is only valid inside Schema.Create (table %q)", label, t.table)
+		return
+	}
+	if len(columns) == 0 {
+		t.errf("%s on table %q declares no columns", label, t.table)
+	}
+	if t.create.partition != nil {
+		t.errf("table %q declares two partitioning methods", t.table)
+	}
+	t.create.partition = &partitionBy{method: method, columns: columns}
+}
+
+// UniqueConstraint declares a named table-level UNIQUE constraint. Unlike
+// Unique — which creates a unique index — the constraint's name is what
+// PostgreSQL's ON CONFLICT ON CONSTRAINT references. Inside Schema.Create it
+// renders inline; inside Schema.Table it becomes ALTER TABLE ADD CONSTRAINT
+// (SQLite cannot alter constraints in and rejects it — declare it in Create
+// or use Schema.Recreate). Partial or expression uniqueness stays an index:
+// only plain column lists can be constraints.
+func (t *Table) UniqueConstraint(name string, columns ...string) {
+	if name == "" {
+		t.errf("unique constraint on table %q needs an explicit name: the name is the point of a constraint", t.table)
+	}
+	if len(columns) == 0 {
+		t.errf("unique constraint %q on table %q declares no columns", name, t.table)
+	}
+	uc := &uniqueConstraintDef{name: name, columns: columns}
+	if t.create != nil {
+		t.create.uniques = append(t.create.uniques, uc)
+		return
+	}
+	t.alter.changes = append(t.alter.changes, &addUniqueConstraint{uc: uc})
+}
+
+// DropConstraint drops a named table constraint (unique, check, or foreign
+// key) by name. Irreversible without WithDown. SQLite rejects it — use
+// Schema.Recreate.
+func (t *Table) DropConstraint(name string) {
+	if !t.alterOnly("DropConstraint") {
+		return
+	}
+	if name == "" {
+		t.errf("DropConstraint on table %q declares an empty name", t.table)
+	}
+	t.alter.changes = append(t.alter.changes, &dropConstraint{name: name})
+}
+
 // UniqueExpr is the unique form of IndexExpr.
 func (t *Table) UniqueExpr(name string, exprs ...string) *Index {
 	return t.exprIndex(name, exprs, true)

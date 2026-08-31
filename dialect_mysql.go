@@ -64,12 +64,18 @@ func (d mysqlDialect) compile(op operation) ([]statement, error) {
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
 		return []statement{{fn: o.fn}}, nil
+	case *createPartition, *attachPartition, *detachPartition:
+		return nil, errPartitioning("mysql")
 	default:
 		return nil, fmt.Errorf("migrate: mysql: unsupported operation %T", op)
 	}
 }
 
 func (d mysqlDialect) compileCreate(def *tableDef) ([]statement, error) {
+	def = resolveCompositeIdentity(def)
+	if def.partition != nil {
+		return nil, errPartitioning("mysql")
+	}
 	pk, err := primaryColumns(def)
 	if err != nil {
 		return nil, err
@@ -89,6 +95,9 @@ func (d mysqlDialect) compileCreate(def *tableDef) ([]statement, error) {
 	}
 	for _, chk := range def.checks {
 		clauses = append(clauses, checkClause(myQ, chk))
+	}
+	for _, uc := range def.uniques {
+		clauses = append(clauses, uniqueConstraintClause(myQ, uc))
 	}
 	for _, fk := range def.fks {
 		clauses = append(clauses, foreignClause(myQ, def.constraintTable(), fk))
@@ -166,6 +175,12 @@ func (d mysqlDialect) compileAlter(op *alterTable) ([]statement, error) {
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD %s", table, checkClause(myQ, c.chk)))
 		case *dropCheck:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP CHECK %s", table, myQ.ident(c.name)))
+		case *addUniqueConstraint:
+			// A MySQL unique constraint is a unique index under the given name.
+			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD %s", table, uniqueConstraintClause(myQ, c.uc)))
+		case *dropConstraint:
+			// DROP CONSTRAINT needs MySQL 8.0.19+.
+			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP CONSTRAINT %s", table, myQ.ident(c.name)))
 		default:
 			return nil, fmt.Errorf("migrate: mysql: unsupported change %T", ch)
 		}

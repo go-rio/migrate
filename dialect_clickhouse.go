@@ -66,12 +66,17 @@ func (d clickHouseDialect) compile(op operation) ([]statement, error) {
 		return []statement{{sql: o.sql, args: o.args}}, nil
 	case *goFunc:
 		return []statement{{fn: o.fn}}, nil
+	case *createPartition, *attachPartition, *detachPartition:
+		return nil, errPartitioning("clickhouse")
 	default:
 		return nil, fmt.Errorf("migrate: clickhouse: unsupported operation %T", op)
 	}
 }
 
 func (d clickHouseDialect) compileCreate(def *tableDef) ([]statement, error) {
+	if def.partition != nil {
+		return nil, errPartitioning("clickhouse")
+	}
 	if !def.clickHouseEngineSet {
 		return nil, fmt.Errorf("migrate: clickhouse table %q requires ClickHouseEngine with an explicit engine and sorting key, for example ClickHouseEngine(\"MergeTree() ORDER BY (tenant_id, occurred_at)\")", def.name)
 	}
@@ -83,6 +88,9 @@ func (d clickHouseDialect) compileCreate(def *tableDef) ([]statement, error) {
 	}
 	if len(def.fks) > 0 {
 		return nil, clickHouseForeignError(def.name)
+	}
+	if len(def.uniques) > 0 {
+		return nil, clickHouseUniqueConstraintError(def.name)
 	}
 
 	clauses := make([]string, 0, len(def.columns)+len(def.checks))
@@ -138,6 +146,8 @@ func (d clickHouseDialect) compileAlter(op *alterTable) ([]statement, error) {
 			return nil, clickHouseIndexError(op.table)
 		case *addForeign, *dropForeign:
 			return nil, clickHouseForeignError(op.table)
+		case *addUniqueConstraint, *dropConstraint:
+			return nil, clickHouseUniqueConstraintError(op.table)
 		case *addPrimary, *dropPrimary:
 			return nil, clickHousePrimaryError(op.table)
 		default:
@@ -279,6 +289,10 @@ func clickHousePrimaryError(table string) error {
 
 func clickHouseIndexError(table string) error {
 	return fmt.Errorf("migrate: clickhouse relational index APIs are unsupported on table %q because a skipping-index type cannot be inferred; use Schema.Exec with ALTER TABLE ... ADD INDEX ... TYPE ... and an explicit WithDown", table)
+}
+
+func clickHouseUniqueConstraintError(table string) error {
+	return fmt.Errorf("migrate: clickhouse has no unique constraints for table %q; deduplicate with a ReplacingMergeTree engine and FINAL reads", table)
 }
 
 func clickHouseForeignError(table string) error {
