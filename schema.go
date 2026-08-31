@@ -109,9 +109,8 @@ func (s *Schema) DropIfExists(table string) {
 	s.record(&dropTable{name: table, ifExists: true})
 }
 
-// CreatePartition creates a child table of a partitioned parent with the
-// given bound (ForValuesFromTo, ForValuesIn, ForValuesWith). Rollback drops
-// the child. PostgreSQL only.
+// CreatePartition creates a child of a partitioned parent; rollback drops
+// it. PostgreSQL only.
 func (s *Schema) CreatePartition(child, parent string, bound PartitionBound) {
 	s.requireTable("CreatePartition", child)
 	s.requireTable("CreatePartition", parent)
@@ -121,8 +120,7 @@ func (s *Schema) CreatePartition(child, parent string, bound PartitionBound) {
 	s.record(&createPartition{child: child, parent: parent, bound: &bound})
 }
 
-// CreateDefaultPartition creates the DEFAULT partition of a partitioned
-// parent. Rollback drops it. PostgreSQL only.
+// CreateDefaultPartition creates the DEFAULT partition; rollback drops it.
 func (s *Schema) CreateDefaultPartition(child, parent string) {
 	s.requireTable("CreateDefaultPartition", child)
 	s.requireTable("CreateDefaultPartition", parent)
@@ -130,7 +128,7 @@ func (s *Schema) CreateDefaultPartition(child, parent string) {
 }
 
 // AttachPartition attaches an existing table as a partition; rollback
-// detaches it. PostgreSQL only.
+// detaches it.
 func (s *Schema) AttachPartition(parent, child string, bound PartitionBound) {
 	s.requireTable("AttachPartition", parent)
 	s.requireTable("AttachPartition", child)
@@ -140,8 +138,8 @@ func (s *Schema) AttachPartition(parent, child string, bound PartitionBound) {
 	s.record(&attachPartition{parent: parent, child: child, bound: &bound})
 }
 
-// DetachPartition detaches a partition into a standalone table. The bound is
-// discarded, so it is irreversible without WithDown. PostgreSQL only.
+// DetachPartition detaches a partition into a standalone table; the bound
+// is discarded, so it is irreversible without WithDown.
 func (s *Schema) DetachPartition(parent, child string) {
 	s.requireTable("DetachPartition", parent)
 	s.requireTable("DetachPartition", child)

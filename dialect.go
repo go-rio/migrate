@@ -412,10 +412,9 @@ func inlineIndexes(cols []*columnDef) []*indexDef {
 	return idxs
 }
 
-// resolveCompositeIdentity lets a table-level Primary include the
-// auto-incrementing column — partitioned parents need the composite form.
-// The column keeps its identity but stops rendering an inline PRIMARY KEY;
-// def is copied, never mutated (declarations replay).
+// resolveCompositeIdentity lets a table-level Primary include the identity
+// column (partitioned parents need that): the copy stops rendering an
+// inline PRIMARY KEY. def is never mutated — declarations replay.
 func resolveCompositeIdentity(def *tableDef) *tableDef {
 	for i, c := range def.columns {
 		if c.inlinePrimary() && slices.Contains(def.primary, c.name) {

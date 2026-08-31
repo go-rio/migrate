@@ -254,11 +254,9 @@ func (t *Table) IndexExpr(name string, exprs ...string) *Index {
 	return t.exprIndex(name, exprs, false)
 }
 
-// PartitionByRange declares the table as a PostgreSQL range-partitioned
-// parent. The parent stores no rows itself; add children with
-// Schema.CreatePartition. PostgreSQL requires every PK and unique constraint
-// to include the partition key. Only valid inside Schema.Create; other
-// dialects reject it (ClickHouse partitions via ClickHouseEngine).
+// PartitionByRange declares a PostgreSQL range-partitioned parent; add
+// children with Schema.CreatePartition. Create-only; the PK must include
+// the partition key.
 func (t *Table) PartitionByRange(columns ...string) {
 	t.partitionBy("RANGE", columns)
 }
@@ -288,13 +286,9 @@ func (t *Table) partitionBy(method string, columns []string) {
 	t.create.partition = &partitionBy{method: method, columns: columns}
 }
 
-// UniqueConstraint declares a named table-level UNIQUE constraint. Unlike
-// Unique — which creates a unique index — the constraint's name is what
-// PostgreSQL's ON CONFLICT ON CONSTRAINT references. Inside Schema.Create it
-// renders inline; inside Schema.Table it becomes ALTER TABLE ADD CONSTRAINT
-// (SQLite cannot alter constraints in and rejects it — declare it in Create
-// or use Schema.Recreate). Partial or expression uniqueness stays an index:
-// only plain column lists can be constraints.
+// UniqueConstraint declares a named table-level UNIQUE constraint — the
+// form ON CONFLICT ON CONSTRAINT can reference, unlike Unique's index.
+// SQLite supports it in Create only; alter via Schema.Recreate.
 func (t *Table) UniqueConstraint(name string, columns ...string) {
 	if name == "" {
 		t.errf("unique constraint on table %q needs an explicit name: the name is the point of a constraint", t.table)
@@ -310,9 +304,8 @@ func (t *Table) UniqueConstraint(name string, columns ...string) {
 	t.alter.changes = append(t.alter.changes, &addUniqueConstraint{uc: uc})
 }
 
-// DropConstraint drops a named table constraint (unique, check, or foreign
-// key) by name. Irreversible without WithDown. SQLite rejects it — use
-// Schema.Recreate.
+// DropConstraint drops any named table constraint. Irreversible without
+// WithDown; SQLite alters via Schema.Recreate.
 func (t *Table) DropConstraint(name string) {
 	if !t.alterOnly("DropConstraint") {
 		return

@@ -254,9 +254,8 @@ func (o *recreateTable) inverse() (operation, error) {
 	return nil, irreversible("recreating table %q discards its previous definition", o.def.name)
 }
 
-// PartitionBound places one child under a partitioned parent. Construct it
-// with ForValuesFromTo, ForValuesIn, or ForValuesWith; the zero value is
-// invalid (CreateDefaultPartition covers DEFAULT).
+// PartitionBound places one child under a partitioned parent; the zero
+// value is invalid (CreateDefaultPartition covers DEFAULT).
 type PartitionBound struct {
 	kind      string // "range", "list", "hash"
 	from, to  any
@@ -265,8 +264,7 @@ type PartitionBound struct {
 	remainder int
 }
 
-// ForValuesFromTo bounds a RANGE partition: FOR VALUES FROM (from) TO (to).
-// Values render as SQL literals.
+// ForValuesFromTo bounds a RANGE partition; values render as SQL literals.
 func ForValuesFromTo(from, to any) PartitionBound {
 	return PartitionBound{kind: "range", from: from, to: to}
 }

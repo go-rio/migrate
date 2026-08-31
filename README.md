@@ -147,49 +147,33 @@ one pair there.
 
 ### Named unique constraints
 
-`Unique` creates a unique index. When PostgreSQL's `ON CONFLICT ON
-CONSTRAINT` must reference the name, declare a table constraint instead:
-
 ```go
-t.UniqueConstraint("uk_inventory_client_ref", "owner_id", "client_ref")
-t.DropConstraint("uk_inventory_client_ref") // any named constraint; irreversible
+t.UniqueConstraint("uk_inventory_ref", "owner_id", "client_ref") // ON CONFLICT ON CONSTRAINT target
+t.DropConstraint("uk_inventory_ref")                             // irreversible
 ```
 
-Inside `Create` it renders inline; inside `Table` it becomes
-`ALTER TABLE ... ADD CONSTRAINT` (MySQL's `DROP CONSTRAINT` needs 8.0.19+).
-SQLite cannot alter constraints in — declare it in `Create` or use
-`Recreate`, which preserves the constraint name through the rebuild. Partial
-and expression uniqueness stay indexes; only plain column lists can be
-constraints.
+Inline in `Create`, `ADD CONSTRAINT` in `Table` (MySQL `DROP CONSTRAINT`
+needs 8.0.19+). SQLite alters via `Recreate`, which keeps the name. Partial
+and expression uniqueness stay indexes.
 
 ### Partitioning (PostgreSQL)
-
-Declarative partitioning is PostgreSQL-only; MySQL raw partition syntax and
-ClickHouse's engine-level `PARTITION BY` stay with `Exec`/`ClickHouseEngine`.
 
 ```go
 s.Create("inventory_log", func(t *migrate.Table) {
     t.BigInteger("id").AutoIncrement()
     t.TimestampTz("event_at")
-    t.Primary("id", "event_at") // the PK must include the partition key
+    t.Primary("id", "event_at") // must include the partition key
     t.PartitionByRange("event_at") // or PartitionByList / PartitionByHash
 })
 s.CreatePartition("inventory_log_202609", "inventory_log",
-    migrate.ForValuesFromTo("2026-09-01", "2026-10-01"))
-s.CreatePartition("inventory_snapshot_h0", "inventory_snapshot",
-    migrate.ForValuesWith(8, 0)) // MODULUS, REMAINDER
+    migrate.ForValuesFromTo("2026-09-01", "2026-10-01")) // or ForValuesIn / ForValuesWith
 s.CreateDefaultPartition("inventory_log_default", "inventory_log")
 s.AttachPartition("inventory_log", "old_rows", migrate.ForValuesFromTo(a, b))
 s.DetachPartition("inventory_log", "inventory_log_202609") // irreversible
 ```
 
-`CreatePartition` rolls back by dropping the child and `AttachPartition` by
-detaching; `DetachPartition` discards the bound and needs `WithDown`. A
-table-level `Primary` may include the auto-incrementing column, which then
-renders as a plain identity inside the composite key (SQLite rejects that
-combination — its rowid alias must be the sole key). Dynamic partition
-maintenance (creating next month's child on a schedule) stays application
-logic.
+PostgreSQL-only; other dialects reject it. Create and attach reverse
+automatically. SQLite rejects identity inside a composite key.
 
 ## Altering tables
 
