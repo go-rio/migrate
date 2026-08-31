@@ -88,10 +88,10 @@ func analyzeSafety(dialect string, ops []operation) []string {
 				case *addPrimary:
 					warn("adding a primary key to existing table %q rewrites the table under lock on most engines", o.table)
 				case *addUniqueConstraint:
-				if dialect == "postgres" {
-					warn("adding unique constraint %q builds its index while blocking writes to %q; on a large table CREATE UNIQUE INDEX CONCURRENTLY via Exec on a WithoutTransaction migration, then ADD CONSTRAINT ... USING INDEX", c.uc.name, o.table)
-				}
-			case *addCheck:
+					if dialect == "postgres" {
+						warn("adding unique constraint %q builds its index while blocking writes to %q; on a large table CREATE UNIQUE INDEX CONCURRENTLY via Exec on a WithoutTransaction migration, then ADD CONSTRAINT ... USING INDEX", c.uc.name, o.table)
+					}
+				case *addCheck:
 					switch dialect {
 					case "postgres":
 						warn("adding check constraint %q validates every row of %q under lock; on a large table add it NOT VALID via Exec, then VALIDATE CONSTRAINT separately", c.chk.name, o.table)
