@@ -6,19 +6,11 @@
 [![Test](https://github.com/go-rio/migrate/actions/workflows/test.yml/badge.svg)](https://github.com/go-rio/migrate/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/go-rio/migrate)](https://opensource.org/license/MIT)
 
-Schema migrations written as Go code and compiled into your binary. No SQL
-files to ship, no CLI to install, no dependencies beyond `database/sql`.
-
-- **One declaration, four dialects.** PostgreSQL, MySQL, SQLite, and
-  single-server ClickHouse; unsupported operations fail at compile time.
-- **Automatic rollback.** Structural operations reverse themselves;
-  information-discarding ones (drops, raw SQL, Go functions) need an
-  explicit `WithDown` or fail with `ErrIrreversible`.
-- **Reviewable and tamper-evident.** `Plan` previews pending SQL,
-  `Collection.SQL` renders offline, checksums flag applied migrations
-  edited afterwards.
-- **Serialized and safe.** Advisory locks keep concurrent migrators apart;
-  a safety analysis flags risky operations before anything executes.
+Schema migrations written as Go code and compiled into your binary: one
+declaration compiles to PostgreSQL, MySQL, SQLite, or single-server
+ClickHouse SQL, with automatic rollback, dry-run plans, checksums, and
+repeatable migrations. No SQL files to ship, no CLI to install, no
+dependencies beyond `database/sql`.
 
 ```go
 func init() {
@@ -42,18 +34,54 @@ Requires Go 1.27+.
 go get github.com/go-rio/migrate
 ```
 
-Keep one file per migration in a `migrations` package, imported for effect
-from `main` (`import _ "app/migrations"`). Names order lexically and are
-recorded in the database, so start them with a sortable timestamp;
-registration panics on duplicate or malformed names at init time.
-Declarations must be deterministic — they re-run for planning, checksums,
-application, and rollback.
+Register migrations from `init` functions and apply them at startup:
 
 ```go
-m, err := migrate.New(db, migrate.Postgres) // db: your *sql.DB, any driver
-...
-if err := m.Up(ctx); err != nil {
-	log.Fatal(err)
+// migrations/20260708100000_create_users.go
+package migrations
+
+import "github.com/go-rio/migrate"
+
+func init() {
+	migrate.Add("20260708100000_create_users", func(s *migrate.Schema) {
+		s.Create("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email").Unique()
+			t.Timestamps()
+		})
+	})
+}
+```
+
+```go
+// main.go
+package main
+
+import (
+	"context"
+	"database/sql"
+	"log"
+
+	"github.com/go-rio/migrate"
+	_ "github.com/jackc/pgx/v5/stdlib" // any database/sql driver
+
+	_ "app/migrations" // registers the migrations
+)
+
+func main() {
+	db, err := sql.Open("pgx", "postgres://localhost/app")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	m, err := migrate.New(db, migrate.Postgres)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := m.Up(context.Background()); err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
@@ -62,7 +90,31 @@ Dialects are `migrate.Postgres`, `migrate.MySQL`, `migrate.SQLite`, and
 [rio](https://github.com/go-rio/rio) ORM) and never closes it. Each run
 uses one dedicated `*sql.Conn`: lock, DDL, and bookkeeping share a session.
 
-## Columns
+## Features
+
+- **One declaration, four dialects.** PostgreSQL, MySQL, SQLite, and
+  single-server ClickHouse; unsupported operations fail at compile time.
+- **Automatic rollback.** Structural operations reverse themselves;
+  information-discarding ones (drops, raw SQL, Go functions) need an
+  explicit `WithDown` or fail with `ErrIrreversible`.
+- **Reviewable and tamper-evident.** `Plan` previews pending SQL,
+  `Collection.SQL` renders offline, checksums flag applied migrations
+  edited afterwards.
+- **Serialized and safe.** Advisory locks keep concurrent migrators apart;
+  a safety analysis flags risky operations before anything executes.
+
+### Migration files
+
+Keep one file per migration in a `migrations` package, imported for effect
+from `main` (`import _ "app/migrations"`). Names order lexically and are
+recorded in the database, so start them with a sortable timestamp;
+registration panics on duplicate or malformed names at init time.
+Declarations must be deterministic — they re-run for planning, checksums,
+application, and rollback. `migrate.Add` registers into the package-level
+collection; `migrate.NewCollection` with `WithCollection` keeps an explicit
+one.
+
+### Columns
 
 ```go
 s.Create("articles", func(t *migrate.Table) {
@@ -104,7 +156,7 @@ s.Create("articles", func(t *migrate.Table) {
 | SQLite | `INTEGER PRIMARY KEY AUTOINCREMENT` |
 | ClickHouse | unsupported — generate IDs in the application |
 
-## Indexes and foreign keys
+### Indexes and foreign keys
 
 ```go
 t.Index("a", "b")                 // articles_a_b_index
@@ -145,7 +197,7 @@ such as an operator class (`"lower(email) text_pattern_ops"`). MySQL alone
 requires every functional key part parenthesized, so each expression gains
 one pair there.
 
-### Named unique constraints
+#### Named unique constraints
 
 ```go
 t.UniqueConstraint("uk_inventory_ref", "owner_id", "client_ref") // ON CONFLICT ON CONSTRAINT target
@@ -156,7 +208,7 @@ Inline in `Create`, `ADD CONSTRAINT` in `Table` (MySQL `DROP CONSTRAINT`
 needs 8.0.19+). SQLite alters via `Recreate`, which keeps the name. Partial
 and expression uniqueness stay indexes.
 
-## Altering tables
+### Altering tables
 
 ```go
 migrate.Add("20260801120000_polish_users", func(s *migrate.Schema) {
@@ -187,7 +239,7 @@ and default; SQLite cannot alter columns — use `Recreate`. Index modifiers,
 primary keys, auto-increment, and generated expressions cannot be restated.
 The old definition is discarded, so rolling back needs `WithDown`.
 
-## Rebuilding tables
+### Rebuilding tables
 
 `Recreate` declares the full target table and rebuilds it around the data
 (create temporary, copy rows, capture triggers, drop old, rename, rebuild
@@ -219,7 +271,7 @@ s.Recreate("users", func(t *migrate.Table) {
 - SQLite: with `PRAGMA foreign_keys=ON` and child rows referencing the
   table, run on a connection with enforcement off (the default).
 
-## Raw SQL and data migrations
+### Raw SQL and data migrations
 
 ```go
 migrate.Add("20260805090000_backfill",
@@ -245,7 +297,7 @@ report. Statements that refuse transactions (`CREATE INDEX CONCURRENTLY`)
 need `migrate.WithoutTransaction()`; each statement then commits as it
 runs.
 
-## Repeatable migrations
+### Repeatable migrations
 
 A repeatable migration re-runs whenever its compiled SQL changes — for
 views, functions, triggers, and reference data:
@@ -265,7 +317,7 @@ records so the next `Up` re-runs them all. A `Run` body is invisible to the
 checksum: edit SQL, not Go, to trigger a re-run. Postgres refuses to roll
 back a migration whose table a live view depends on; drop the view first.
 
-## Running
+### Running
 
 | Call | Effect |
 |---|---|
@@ -291,7 +343,7 @@ Each applied migration records a checksum of its compiled SQL and arguments
 `Up` warns — or fails with `ErrChecksumMismatch` under `WithStrictChecksum`
 — `Status` reports it, and `Repair` re-records after review.
 
-## Safety analysis
+### Safety analysis
 
 Before executing anything, the migrator checks declarative operations that
 are safe empty but dangerous on a loaded database: destructive drops,
@@ -310,7 +362,7 @@ are not parsed. `Plan` attaches findings to each planned migration.
 | `WithSafety(migrate.SafetyOff)` | disables the analysis |
 | `Assured()` (per migration) | marks a reviewed migration; the analysis skips it |
 
-## Dialect differences
+### Dialect differences
 
 | | PostgreSQL | MySQL | SQLite | ClickHouse |
 |---|---|---|---|---|
@@ -326,7 +378,7 @@ dirty-state `force` API. Session advisory locks do not survive
 transaction-pooling proxies (PgBouncer in transaction mode): point the
 migrator at the database directly or through a session-mode pool.
 
-### ClickHouse
+#### ClickHouse
 
 Support targets one ClickHouse 26.0+ server and one local database — no
 `ON CLUSTER`, Keeper/ZooKeeper, replicated databases, `Distributed` tables,
@@ -382,11 +434,13 @@ baselining.
 
 ## Contributing
 
-```bash
-go test ./...
-go test -race ./...
-go vet ./...
-```
+Bug reports, questions, and pull requests are welcome; see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the test setup, commit conventions,
+comment style, and release process.
+
+## Contributors
+
+Thanks to everyone who has [contributed](https://github.com/go-rio/migrate/graphs/contributors).
 
 ## License
 

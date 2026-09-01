@@ -1,0 +1,226 @@
+# migrate
+
+> Schema migrations declared as Go code and compiled into the binary, for PostgreSQL, MySQL, SQLite, and single-server ClickHouse.
+
+## Overview
+
+`github.com/go-rio/migrate` is a Go library with no CLI and no SQL files. Builder declarations compile to dialect SQL, run through a caller-owned `*sql.DB`, and each applied migration is recorded with a checksum. Structural operations reverse automatically, `Plan` previews pending SQL, advisory locks serialize concurrent migrators, and a safety analysis warns about operations that are harmless on an empty database but disruptive on a loaded one. It is for applications that ship their migrations inside their own binary and run them at startup or from a deploy step.
+
+## Quick Start
+
+```bash
+go get github.com/go-rio/migrate
+```
+
+```go
+package main
+
+import (
+	"context"
+	"database/sql"
+	"log"
+
+	"github.com/go-rio/migrate"
+	_ "github.com/jackc/pgx/v5/stdlib" // any database/sql driver
+)
+
+func init() {
+	migrate.Add("20260708100000_create_users", func(s *migrate.Schema) {
+		s.Create("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email").Unique()
+			t.Enum("role", "admin", "member").Default("member")
+			t.Timestamps()
+		})
+	})
+}
+
+func main() {
+	db, err := sql.Open("pgx", "postgres://localhost/app")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	m, err := migrate.New(db, migrate.Postgres)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := m.Up(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+## Key Concepts
+
+- **Migration**: a named, deterministic `func(*Schema)`. Names order lexically and are recorded in the database, so start them with a sortable timestamp. Registration panics on empty, whitespace-padded, over-191-character, or duplicate names and on a nil function. Declarations re-run for planning, checksums, application, and rollback.
+- **Collection**: a set of migrations. `migrate.Add` and `migrate.AddRepeatable` use the package-level collection; `NewCollection` plus `WithCollection` keeps an explicit one.
+- **Schema**: records operations without touching the database. `Create`, `Table` (alter), `Recreate` (rebuild around the rows), `Rename`, `Drop`, `DropIfExists`, `Exec` (raw SQL, checksummed), `Run` (Go function, not checksummed).
+- **Builders**: `Table` declares columns (`ID`, `String`, `Text`, `Integer`, `BigInteger`, `Boolean`, `Decimal`, `Date`, `DateTime`, `TimestampTz`, `JSON`, `UUID`, `Binary`, `Enum`, `Column` verbatim, `Timestamps`, `SoftDeletes`, `ForeignID`), indexes (`Index`, `Unique`, `FullText`, `Spatial`, `IndexExpr`, `UniqueExpr`, `UniqueConstraint`), keys (`Primary`, `Foreign`, `Check`), and drops. `Column` chains `Nullable`, `Default`, `DefaultExpr`, `UseCurrent`, `Unsigned`, `AutoIncrement`, `Primary`, `Unique`, `Index`, `Comment`, `StoredAs`/`VirtualAs`, `Change`/`Using`, `CopyFrom`/`SkipCopy`. Columns are `NOT NULL` unless `.Nullable()`.
+- **Dialect**: `Postgres`, `MySQL`, `SQLite`, `ClickHouse` compile the same declaration; a feature a dialect cannot preserve fails at compile time with the alternative named.
+- **Batch**: every `Up` records its migrations under one batch number. `RollbackBatch` undoes the latest batch; baselined rows carry batch 0 and only `Reset` reverses them; repeatables carry batch -1.
+- **Repeatable migration**: re-runs whenever its compiled SQL checksum changes (views, functions, reference data), after versioned migrations, with no rollback.
+- **Checksum**: SHA-256 over compiled SQL and arguments (type-tagged, length-prefixed; `Run` bodies excluded). Drift warns, or fails with `ErrChecksumMismatch` under `WithStrictChecksum`; `Repair` accepts reviewed drift.
+- **Lock**: PostgreSQL session advisory lock, MySQL `GET_LOCK`, SQLite single-writer transaction with record-first bookkeeping, ClickHouse none (`ErrLockUnsupported` until `WithoutLock`). Session locks do not survive transaction-pooling proxies.
+- **Transaction**: PostgreSQL and SQLite run each migration in one transaction; MySQL commits DDL implicitly and the failure error names the persisted prefix; ClickHouse has none. `WithoutTransaction` opts a migration out, which `CREATE INDEX CONCURRENTLY` requires.
+- **Safety analysis**: inspects declarative operations before execution. `SafetyWarn` (default) logs, `SafetyStrict` fails with `ErrUnsafe`, `SafetyOff` disables, `Assured()` skips one migration.
+
+## API Reference
+
+### Core Functions
+
+- `Add(name string, up func(*Schema), opts ...MigrationOption)` - register a versioned migration in the default collection; panics on invalid or duplicate names.
+- `AddRepeatable(name string, run func(*Schema), opts ...MigrationOption)` - register a repeatable migration; it cannot take `WithDown`.
+- `NewCollection() *Collection` - empty explicit collection with the same `Add`/`AddRepeatable` methods.
+- `New(db *sql.DB, dialect Dialect, opts ...Option) (*Migrator, error)` - wrap a caller-owned `*sql.DB`; the dialect must match the driver. Fails on a nil db or dialect or invalid options.
+- `WithDown(func(*Schema)) MigrationOption` - explicit rollback for irreversible operations.
+- `WithoutTransaction() MigrationOption` - run each statement under autocommit.
+- `Assured() MigrationOption` - mark a migration reviewed; the safety analysis skips it.
+- `Option` constructors for `New`: `WithCollection(*Collection)`, `WithTable(name)` (records table and lock namespace; may be schema-qualified), `WithoutLock()`, `WithLockTimeout(time.Duration)` (default one minute), `WithStrictChecksum()`, `WithSafety(SafetyLevel)`, `WithLogger(*slog.Logger)`, `WithClock(Clock)`.
+
+### Migrator Methods
+
+- `Up(ctx) error` - apply pending versioned migrations as one batch, then changed repeatables.
+- `Rollback(ctx, steps int) error` - undo the most recent `steps` migrations; `RollbackBatch(ctx) error` - undo the latest batch; `Reset(ctx) error` - undo everything, baselined rows included, and forget repeatable records.
+- `Status(ctx) ([]Status, error)` - registered and recorded migrations in name order with `Applied`, `Batch`, `AppliedAt`, `Registered`, `Repeatable`, `Drifted`.
+- `Plan(ctx) ([]Planned, error)`, `PlanRollback(ctx, steps int)`, `PlanRollbackBatch(ctx)` - render the SQL that would run, with safety findings in `Planned.Warnings`.
+- `Baseline(ctx, upTo ...string) error` - record migrations as applied without executing them; an optional name bounds versioned migrations.
+- `Repair(ctx) error` - re-record versioned checksums after a reviewed edit.
+- `Fresh(ctx) error` - development only: drop every table and reapply all migrations.
+- `Collection.SQL(dialect Dialect) ([]Planned, error)` - render an entire collection offline, without a database.
+
+### Core Types
+
+- `Migrator` - applies one `Collection` to a database on one dedicated `*sql.Conn` per run.
+- `Migration` - one registered declaration; `Name()` returns its name.
+- `Collection` - named migration set.
+- `Schema`, `Table`, `Column`, `Index`, `ForeignKey`, `ForeignColumn` - declaration builders.
+- `Status` - per-migration record: `Name`, `Applied`, `Batch`, `AppliedAt`, `Registered`, `Repeatable`, `Drifted`.
+- `Planned` - one migration in a dry-run plan: `Name`, `Statements`, `Warnings`.
+- `DB` - `ExecContext`, `QueryContext`, `QueryRowContext`; passed to `Run` and satisfied by `*sql.DB`, `*sql.Conn`, `*sql.Tx`.
+- `Dialect` - `Postgres`, `MySQL`, `SQLite`, `ClickHouse`; its methods are unexported, so no other implementation exists.
+- `SafetyLevel` - `SafetyWarn`, `SafetyStrict`, `SafetyOff`.
+- `DefaultLiteral` - scalar type set accepted by `Column.Default`.
+- `Clock` - `Now() time.Time`, injected with `WithClock`.
+
+## Common Patterns
+
+### Altering a table
+
+```go
+migrate.Add("20260801120000_polish_users", func(s *migrate.Schema) {
+	s.Table("users", func(t *migrate.Table) {
+		t.String("nickname", 50).Nullable().Index()
+		t.RenameColumn("name", "full_name")
+		t.String("name", 500).Nullable().Change() // restate the full definition
+		t.DropColumn("legacy_flags")
+	})
+	s.Rename("groups", "teams")
+})
+```
+
+Each change compiles to its own statement and reverses on its own; `Change` and `DropColumn` discard information, so the migration needs `WithDown` to roll back.
+
+### Data migration with explicit rollback
+
+```go
+migrate.Add("20260805090000_backfill",
+	func(s *migrate.Schema) {
+		s.Exec(`UPDATE users SET plan = 'free' WHERE plan IS NULL`)
+		s.Run(func(ctx context.Context, db migrate.DB) error {
+			_, err := db.ExecContext(ctx, `UPDATE users SET score = score * 10`)
+			return err
+		})
+	},
+	migrate.WithDown(func(s *migrate.Schema) {
+		s.Exec(`UPDATE users SET score = score / 10`)
+	}),
+)
+```
+
+Keep DDL out of `Run` on MySQL: implicit commits inside an opaque function escape the failure report.
+
+### Repeatable view
+
+```go
+migrate.AddRepeatable("active_users_view", func(s *migrate.Schema) {
+	s.Exec(`CREATE OR REPLACE VIEW active_users AS
+	        SELECT * FROM users WHERE deleted_at IS NULL`)
+})
+```
+
+Must be idempotent (on SQLite: `DROP VIEW IF EXISTS` then `CREATE VIEW`). Edit SQL, not Go, to trigger a re-run.
+
+### Rebuilding a table (any SQLite constraint change)
+
+```go
+s.Recreate("users", func(t *migrate.Table) {
+	t.ID()
+	t.String("email").Unique()                         // the new constraint
+	t.Integer("logins").Default(0).SkipCopy()          // column absent from the old table
+	t.Integer("age").CopyFrom("CAST(age AS INTEGER)")  // retype during the copy
+})
+```
+
+PostgreSQL and SQLite rebuild inside the migration transaction; MySQL and ClickHouse reject `Recreate` at compile time. Needs `WithDown`; cannot combine with `WithoutTransaction`.
+
+### Online index on PostgreSQL
+
+```go
+migrate.Add("20260810090000_index_orders_user",
+	func(s *migrate.Schema) {
+		s.Table("orders", func(t *migrate.Table) {
+			t.Index("user_id").Concurrently()
+		})
+	},
+	migrate.WithoutTransaction(),
+)
+```
+
+### ClickHouse table
+
+```go
+c := migrate.NewCollection()
+c.Add("20260809100000_create_events", func(s *migrate.Schema) {
+	s.Create("events", func(t *migrate.Table) {
+		t.UUID("id")
+		t.String("tenant_id")
+		t.TimestampTz("occurred_at")
+		t.JSON("payload")
+		t.ClickHouseEngine("MergeTree() PARTITION BY toYYYYMM(occurred_at) ORDER BY (tenant_id, occurred_at)")
+	})
+})
+m, err := migrate.New(db, migrate.ClickHouse, migrate.WithCollection(c), migrate.WithoutLock())
+```
+
+`ClickHouseEngine` is required on every `Create` and ignored by other dialects. `WithoutLock` is required because ClickHouse has no migration lock; the deploy system must serialize runs.
+
+### Previewing and inspecting
+
+```go
+plans, err := m.Plan(ctx)        // pending SQL plus safety warnings
+sts, err := m.Status(ctx)        // applied, pending, drifted, unregistered
+plans, err = c.SQL(migrate.Postgres) // whole collection, no database
+```
+
+## Error Handling
+
+All sentinel errors work with `errors.Is`; messages start with `migrate:` and name the alternative.
+
+- `ErrIrreversible` - `Rollback`, `RollbackBatch`, `Reset`, or a rollback plan reached a migration whose up discards information (drop, raw SQL, `Run`, `Change`, `Recreate`, `DropConstraint`, comment change) and has no `WithDown`. Add `WithDown` or leave the migration applied.
+- `ErrChecksumMismatch` - `Up` under `WithStrictChecksum` found an applied versioned migration that now compiles differently. Review the edit, then `Repair`; without the option `Up` only warns and `Status` reports `Drifted`.
+- `ErrUnsafe` - `Up` under `SafetyStrict` refused the run; the message lists every finding. Review, then mark the migration `Assured()` or lower the level with `WithSafety`.
+- `ErrLockTimeout` - the advisory lock was not acquired within `WithLockTimeout` (default one minute).
+- `ErrLockUnsupported` - the dialect (ClickHouse) has no built-in lock. Serialize execution externally, then pass `WithoutLock`.
+- Declaration errors - surfaced when a migration compiles (`Up`, `Plan`, `Status`, `SQL`): empty names, tables without columns, `Change` outside `Table`, `Concurrently` inside a transaction, dialect-unsupported features. Registration problems (bad or duplicate names, nil functions) panic at init time instead.
+- Failed migrations - the error names the failing statement (`statement i/n (...)`) and, where the dialect cannot roll back (MySQL implicit DDL commits, ClickHouse, `WithoutTransaction`), the prefix that already took effect. Failed runs never add a migration record and there is no force or dirty-state API; reconcile the schema, then retry or `Baseline`.
+- A duplicate version in the records table is a hard error: the external serialization guarantee was violated.
+
+## References
+
+- README: https://github.com/go-rio/migrate/blob/main/README.md
+- CHANGELOG: https://github.com/go-rio/migrate/blob/main/CHANGELOG.md
+- Repository: https://github.com/go-rio/migrate
+- Go Reference: https://pkg.go.dev/github.com/go-rio/migrate
+- Issues: https://github.com/go-rio/migrate/issues

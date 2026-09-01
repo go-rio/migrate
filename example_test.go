@@ -18,7 +18,8 @@ const (
 	roleMember role = "member"
 )
 
-// Applications can register migrations from init functions.
+// Applications register migrations from init functions in a migrations
+// package imported for effect.
 func init() {
 	migrate.Add("20260708100000_create_users", func(s *migrate.Schema) {
 		s.Create("users", func(t *migrate.Table) {
@@ -42,8 +43,9 @@ func init() {
 	})
 }
 
-// Applications can apply compiled-in migrations at startup.
-func Example() {
+// New wraps a caller-owned *sql.DB; the dialect must match the driver, and
+// options tune locking, checksums, safety, and logging.
+func ExampleNew() {
 	db, err := sql.Open("pgx", "postgres://localhost/app") // driver of your choice
 	if err != nil {
 		log.Fatal(err)
@@ -53,17 +55,52 @@ func Example() {
 	m, err := migrate.New(db, migrate.Postgres,
 		migrate.WithLogger(slog.Default()),
 		migrate.WithLockTimeout(2*time.Minute),
+		migrate.WithStrictChecksum(),
+		migrate.WithSafety(migrate.SafetyStrict),
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := m.Up(context.Background()); err != nil {
+
+	statuses, err := m.Status(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, st := range statuses {
+		fmt.Printf("%s applied=%t drifted=%t\n", st.Name, st.Applied, st.Drifted)
+	}
+}
+
+// Up applies pending migrations as one batch, then changed repeatables; Plan
+// previews the SQL and safety findings first.
+func ExampleMigrator_Up() {
+	db, err := sql.Open("pgx", "postgres://localhost/app")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	m, err := migrate.New(db, migrate.Postgres)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ctx := context.Background()
+	plans, err := m.Plan(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, p := range plans {
+		fmt.Printf("-- %s: %d statements, %d warnings\n", p.Name, len(p.Statements), len(p.Warnings))
+	}
+	if err := m.Up(ctx); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// Data migrations with Go logic require an explicit rollback.
-func Example_dataMigration() {
+// Builders reverse themselves; raw SQL and Go functions discard information,
+// so a migration using them declares its rollback with WithDown.
+func ExampleAdd() {
 	migrate.Add("20260709120000_backfill_names",
 		func(s *migrate.Schema) {
 			s.Table("users", func(t *migrate.Table) {
