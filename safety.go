@@ -31,6 +31,38 @@ func Assured() MigrationOption {
 	return func(m *Migration) { m.assured = true }
 }
 
+// checkSafety collects every strict finding before execution.
+func (m *Migrator) checkSafety(migs []*Migration) error {
+	if m.cfg.safety == SafetyOff {
+		return nil
+	}
+	var violations []string
+	for _, mig := range migs {
+		if mig.assured {
+			continue
+		}
+		ops, err := mig.upOps()
+		if err != nil {
+			return err
+		}
+		for _, finding := range analyzeSafety(m.d.name(), ops) {
+			if m.cfg.safety == SafetyStrict {
+				violations = append(violations, fmt.Sprintf("%s: %s", mig.name, finding))
+			} else {
+				m.cfg.logger.Warn("migrate: safety", "migration", mig.name, "finding", finding)
+			}
+		}
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	var msg strings.Builder
+	for _, v := range violations {
+		msg.WriteString("\n  - " + v)
+	}
+	return fmt.Errorf("%w:%s\n(review each finding, then mark the migration Assured() or lower the level with WithSafety)", ErrUnsafe, msg.String())
+}
+
 // analyzeSafety checks known disruptive schema operations, not raw SQL or Run.
 func analyzeSafety(dialect string, ops []operation) []string {
 	var findings []string
@@ -58,7 +90,8 @@ func analyzeSafety(dialect string, ops []operation) []string {
 						continue
 					}
 					// Generated columns fill existing rows themselves.
-					if !c.col.nullable && !c.col.hasDefault && !c.col.useCurrent && !c.col.autoIncr && c.col.generatedExpr == "" {
+					hasValueSource := c.col.hasDefault || c.col.useCurrent || c.col.autoIncr || c.col.generatedExpr != ""
+					if !c.col.nullable && !hasValueSource {
 						if dialect == "clickhouse" {
 							warn("adding non-Nullable column %q to existing ClickHouse table %q makes old rows read the type's zero value; declare an explicit Default when that is not the intended value", c.col.name, o.table)
 							continue
@@ -95,36 +128,4 @@ func analyzeSafety(dialect string, ops []operation) []string {
 		}
 	}
 	return findings
-}
-
-// checkSafety collects every strict finding before execution.
-func (m *Migrator) checkSafety(migs []*Migration) error {
-	if m.cfg.safety == SafetyOff {
-		return nil
-	}
-	var violations []string
-	for _, mig := range migs {
-		if mig.assured {
-			continue
-		}
-		ops, err := mig.upOps()
-		if err != nil {
-			return err
-		}
-		for _, finding := range analyzeSafety(m.d.name(), ops) {
-			if m.cfg.safety == SafetyStrict {
-				violations = append(violations, fmt.Sprintf("%s: %s", mig.name, finding))
-			} else {
-				m.cfg.logger.Warn("migrate: safety", "migration", mig.name, "finding", finding)
-			}
-		}
-	}
-	if len(violations) == 0 {
-		return nil
-	}
-	var msg strings.Builder
-	for _, v := range violations {
-		msg.WriteString("\n  - " + v)
-	}
-	return fmt.Errorf("%w:%s\n(review each finding, then mark the migration Assured() or lower the level with WithSafety)", ErrUnsafe, msg.String())
 }

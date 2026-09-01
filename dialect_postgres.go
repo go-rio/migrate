@@ -8,7 +8,12 @@ import (
 	"time"
 )
 
-// Postgres is the PostgreSQL dialect.
+// The session lock is scoped by database and records table. It dies with the
+// connection and does not block CREATE INDEX CONCURRENTLY through a snapshot.
+const pgLockKey = "hashtextextended('go-rio/migrate:' || current_database() || ':' || $1, 0)"
+
+// Postgres is the PostgreSQL dialect. Migrations run inside a transaction, and
+// a session-level advisory lock serializes concurrent migrators.
 var Postgres Dialect = postgresDialect{}
 
 type postgresDialect struct{}
@@ -353,7 +358,8 @@ func (d postgresDialect) recreateEpilogue(def *tableDef) []statement {
 			hasInline = true
 		}
 	}
-	if err == nil && (len(pk) > 0 || hasInline) {
+	hasPrimary := len(pk) > 0 || hasInline
+	if err == nil && hasPrimary {
 		tmpPkey := baseName(def.name) + "__migrate_new_pkey"
 		stmts = append(stmts, sqlStatement("ALTER TABLE %s RENAME CONSTRAINT %s TO %s",
 			pgQ.table(def.name), pgQ.ident(tmpPkey), pgQ.ident(primaryName(def.name))))
@@ -375,10 +381,6 @@ func (d postgresDialect) recreateEpilogue(def *tableDef) []statement {
 	}
 	return stmts
 }
-
-// The session lock is scoped by database and records table. It dies with the
-// connection and does not block CREATE INDEX CONCURRENTLY through a snapshot.
-const pgLockKey = "hashtextextended('go-rio/migrate:' || current_database() || ':' || $1, 0)"
 
 func (postgresDialect) lock(
 	ctx context.Context,
@@ -418,14 +420,6 @@ func (postgresDialect) unlock(ctx context.Context, conn *sql.Conn, token lockTok
 	return nil
 }
 
-func dropTableSQL(q quoter, o *dropTable) statement {
-	ifExists := ""
-	if o.ifExists {
-		ifExists = "IF EXISTS "
-	}
-	return sqlStatement("DROP TABLE %s%s", ifExists, q.table(o.name))
-}
-
 func (postgresDialect) quoteIdent(name string) string { return pgQ.table(name) }
 
 func (postgresDialect) tableCommentSQL(table, comment string) statement {
@@ -439,4 +433,12 @@ func (postgresDialect) listTablesSQL() string {
 // CASCADE removes dependent objects such as views.
 func (postgresDialect) freshDropSQL(table string) string {
 	return fmt.Sprintf("DROP TABLE IF EXISTS %s CASCADE", pgQ.table(table))
+}
+
+func dropTableSQL(q quoter, o *dropTable) statement {
+	ifExists := ""
+	if o.ifExists {
+		ifExists = "IF EXISTS "
+	}
+	return sqlStatement("DROP TABLE %s%s", ifExists, q.table(o.name))
 }

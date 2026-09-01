@@ -7,7 +7,8 @@ import (
 	"strings"
 )
 
-// DB is the database/sql surface available to Run functions.
+// DB is the database/sql surface available to Run functions; *sql.DB,
+// *sql.Conn, and *sql.Tx satisfy it.
 type DB interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)

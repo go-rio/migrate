@@ -13,8 +13,9 @@ import (
 	"time"
 )
 
-// Dialect compiles and executes migrations for one database engine.
-// Built-in values are Postgres, MySQL, SQLite, and ClickHouse.
+// Dialect compiles and executes migrations for one database engine. Built-in
+// values are Postgres, MySQL, SQLite, and ClickHouse; the methods are
+// unexported, so no other implementation exists.
 type Dialect interface {
 	name() string
 	compile(op operation) ([]statement, error)
@@ -60,26 +61,8 @@ func sqlStatement(format string, a ...any) statement {
 	return statement{sql: fmt.Sprintf(format, a...)}
 }
 
-func standardRecordInsertSQL(d Dialect, table string) string {
-	return fmt.Sprintf("INSERT INTO %s (version, batch, checksum, applied_at) VALUES (%s, %s, %s, %s)",
-		d.quoteIdent(table), d.placeholder(1), d.placeholder(2), d.placeholder(3), d.placeholder(4))
-}
-
-func standardRecordUpdateSQL(d Dialect, table string) string {
-	return fmt.Sprintf("UPDATE %s SET checksum = %s, applied_at = %s WHERE version = %s",
-		d.quoteIdent(table), d.placeholder(1), d.placeholder(2), d.placeholder(3))
-}
-
-func standardRecordDeleteSQL(d Dialect, table, column string) string {
-	return fmt.Sprintf("DELETE FROM %s WHERE %s = %s",
-		d.quoteIdent(table), column, d.placeholder(1))
-}
-
-func standardRecordRepairSQL(d Dialect, table string) string {
-	return fmt.Sprintf("UPDATE %s SET checksum = %s WHERE version = %s",
-		d.quoteIdent(table), d.placeholder(1), d.placeholder(2))
-}
-
+// quoter quotes identifiers for one dialect; table splits schema-qualified
+// names into individually quoted segments.
 type quoter struct {
 	delimiter       byte
 	escapeBackslash bool
@@ -110,6 +93,26 @@ func (q quoter) table(name string) string {
 		segs[i] = q.ident(s)
 	}
 	return strings.Join(segs, ".")
+}
+
+func standardRecordInsertSQL(d Dialect, table string) string {
+	return fmt.Sprintf("INSERT INTO %s (version, batch, checksum, applied_at) VALUES (%s, %s, %s, %s)",
+		d.quoteIdent(table), d.placeholder(1), d.placeholder(2), d.placeholder(3), d.placeholder(4))
+}
+
+func standardRecordUpdateSQL(d Dialect, table string) string {
+	return fmt.Sprintf("UPDATE %s SET checksum = %s, applied_at = %s WHERE version = %s",
+		d.quoteIdent(table), d.placeholder(1), d.placeholder(2), d.placeholder(3))
+}
+
+func standardRecordDeleteSQL(d Dialect, table, column string) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE %s = %s",
+		d.quoteIdent(table), column, d.placeholder(1))
+}
+
+func standardRecordRepairSQL(d Dialect, table string) string {
+	return fmt.Sprintf("UPDATE %s SET checksum = %s WHERE version = %s",
+		d.quoteIdent(table), d.placeholder(1), d.placeholder(2))
 }
 
 func baseName(table string) string {
@@ -244,6 +247,7 @@ func validateIndex(dialect, table string, idx *indexDef) error {
 			return fmt.Errorf("migrate: NULLS NOT DISTINCT applies to unique indexes only (index %q of table %q)", name, table)
 		}
 	case "mysql":
+		specialized := idx.fulltext || idx.spatial
 		if idx.where != "" {
 			return fmt.Errorf("migrate: mysql does not support partial indexes (index %q of table %q declares Where); enforce the rule in application code or index a generated column", name, table)
 		}
@@ -253,10 +257,10 @@ func validateIndex(dialect, table string, idx *indexDef) error {
 		if idx.nullsNotDistinct {
 			return fmt.Errorf("migrate: mysql cannot make NULLs distinct in unique indexes (index %q of table %q)", name, table)
 		}
-		if (idx.fulltext || idx.spatial) && idx.using != "" {
+		if specialized && idx.using != "" {
 			return fmt.Errorf("migrate: fulltext and spatial indexes choose their own structure; drop Using on index %q of table %q", name, table)
 		}
-		if (idx.fulltext || idx.spatial) && len(idx.exprs) > 0 {
+		if specialized && len(idx.exprs) > 0 {
 			return fmt.Errorf("migrate: fulltext and spatial indexes cover columns, not expressions (index %q of table %q)", name, table)
 		}
 	case "sqlite":
@@ -315,19 +319,13 @@ func createIndexSQL(dialect string, q quoter, table string, idx *indexDef, schem
 	}
 
 	name := idx.resolvedName(table)
-	var b strings.Builder
+	// SQLite qualifies the index name and takes a bare table name.
+	indexRef, tableRef := q.ident(name), q.table(table)
 	if schemaOnIndex {
-		fmt.Fprintf(
-			&b,
-			"CREATE %sINDEX %s%s ON %s",
-			kind,
-			concurrently,
-			q.table(schemaPrefix(table)+name),
-			q.ident(baseName(table)),
-		)
-	} else {
-		fmt.Fprintf(&b, "CREATE %sINDEX %s%s ON %s", kind, concurrently, q.ident(name), q.table(table))
+		indexRef, tableRef = q.table(schemaPrefix(table)+name), q.ident(baseName(table))
 	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "CREATE %sINDEX %s%s ON %s", kind, concurrently, indexRef, tableRef)
 	if idx.using != "" && dialect == "postgres" {
 		b.WriteString(" USING " + idx.using)
 	}
@@ -367,9 +365,8 @@ func inlineIndexes(cols []*columnDef) []*indexDef {
 	return idxs
 }
 
-// resolveCompositeIdentity lets a table-level Primary include the identity
-// column (partitioned parents need that): the copy stops rendering an
-// inline PRIMARY KEY. def is never mutated — declarations replay.
+// resolveCompositeIdentity copies def, never mutating it, so that an identity
+// column listed in a table-level Primary drops its inline PRIMARY KEY.
 func resolveCompositeIdentity(def *tableDef) *tableDef {
 	for i, c := range def.columns {
 		if c.inlinePrimary() && slices.Contains(def.primary, c.name) {
@@ -415,8 +412,14 @@ func declarationErrors(errs []error) error {
 
 // compileRecreate copies rows into a temporary table and swaps names. Live
 // triggers are captured and restored: DROP TABLE would silently discard them.
-func compileRecreate(d Dialect, q quoter, schemaOnIndex bool, renameSQL func(from, to string) statement,
-	listTriggers func(context.Context, DB, string) ([]string, error), def *tableDef) ([]statement, error) {
+func compileRecreate(
+	d Dialect,
+	q quoter,
+	schemaOnIndex bool,
+	renameSQL func(from, to string) statement,
+	listTriggers func(context.Context, DB, string) ([]string, error),
+	def *tableDef,
+) ([]statement, error) {
 	tmp := def.name + "__migrate_new"
 	tmpDef := &tableDef{
 		name:           tmp,

@@ -280,11 +280,6 @@ func (mysqlDialect) typeSQL(c *columnDef) (string, error) {
 	}
 }
 
-func mysqlLockName(database, table string) lockToken {
-	sum := sha256.Sum256([]byte("go-rio.migrate\x00" + database + "\x00" + table))
-	return lockToken(hex.EncodeToString(sum[:]))
-}
-
 func (mysqlDialect) lock(ctx context.Context, conn *sql.Conn, table string, timeout time.Duration) (lockToken, error) {
 	var database sql.NullString
 	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&database); err != nil {
@@ -318,14 +313,21 @@ func (mysqlDialect) unlock(ctx context.Context, conn *sql.Conn, token lockToken)
 
 func (mysqlDialect) quoteIdent(name string) string { return myQ.table(name) }
 
-func mysqlEscape(s string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
-}
-
 func (mysqlDialect) listTablesSQL() string {
 	return "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE'"
 }
 
 func (mysqlDialect) freshDropSQL(table string) string {
 	return fmt.Sprintf("DROP TABLE IF EXISTS %s", myQ.table(table))
+}
+
+// mysqlLockName scopes GET_LOCK by database and records table; hashing keeps
+// the name within MySQL's 64-character limit.
+func mysqlLockName(database, table string) lockToken {
+	sum := sha256.Sum256([]byte("go-rio.migrate\x00" + database + "\x00" + table))
+	return lockToken(hex.EncodeToString(sum[:]))
+}
+
+func mysqlEscape(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
 }

@@ -27,7 +27,8 @@ var (
 	ErrChecksumMismatch = errors.New("migrate: checksum mismatch")
 )
 
-// Migration is an immutable registered declaration.
+// Migration is one registered declaration; Collection.Add creates it and Name
+// identifies it in the records table.
 type Migration struct {
 	name       string
 	up         func(*Schema)
@@ -39,20 +40,6 @@ type Migration struct {
 
 // Name returns the migration's registered name.
 func (m *Migration) Name() string { return m.name }
-
-// MigrationOption configures a single migration at registration time.
-type MigrationOption func(*Migration)
-
-// WithDown defines rollback for otherwise irreversible operations.
-func WithDown(down func(*Schema)) MigrationOption {
-	return func(m *Migration) { m.down = down }
-}
-
-// WithoutTransaction permits statements such as PostgreSQL CREATE INDEX
-// CONCURRENTLY. Earlier statements may remain applied after a failure.
-func WithoutTransaction() MigrationOption {
-	return func(m *Migration) { m.useTx = false }
-}
 
 func (m *Migration) upOps() ([]operation, error) {
 	s := &Schema{}
@@ -81,85 +68,6 @@ func (m *Migration) downOps() ([]operation, error) {
 	return downs, nil
 }
 
-func validateSchema(name string, s *Schema) error {
-	errs := append([]error(nil), s.errs...)
-	check := func(table string, cols []*columnDef, altering bool) {
-		for _, c := range cols {
-			if c.autoIncr {
-				switch {
-				case !c.integerKind() && c.kind != kindRaw:
-					errs = append(errs, fmt.Errorf("auto-increment column %q of table %q must be an integer", c.name, table))
-				case c.hasDefault:
-					errs = append(errs, fmt.Errorf("auto-increment column %q of table %q cannot have a default value", c.name, table))
-				case c.nullable:
-					errs = append(errs, fmt.Errorf("auto-increment column %q of table %q cannot be nullable", c.name, table))
-				}
-			}
-			if c.generatedExpr != "" && (c.hasDefault || c.useCurrent || c.autoIncr) {
-				errs = append(errs, fmt.Errorf("generated column %q of table %q cannot combine with defaults or auto-increment", c.name, table))
-			}
-			if c.copyFrom != "" && c.skipCopy {
-				errs = append(errs, fmt.Errorf("column %q of table %q declares both CopyFrom and SkipCopy", c.name, table))
-			}
-			if c.primary && c.nullable {
-				// SQLite otherwise accepts the contradictory NULL primary key.
-				errs = append(errs, fmt.Errorf("primary key column %q of table %q cannot be nullable", c.name, table))
-			}
-			if c.change && !altering {
-				errs = append(errs, fmt.Errorf("column %q of table %q declares Change, which is only valid inside Schema.Table", c.name, table))
-			}
-			if c.changeUsing != "" && !c.change {
-				errs = append(errs, fmt.Errorf("column %q of table %q declares Using without Change", c.name, table))
-			}
-			if c.change {
-				if c.unique || c.indexed {
-					errs = append(errs, fmt.Errorf("changed column %q of table %q cannot restate Unique/Index modifiers; the existing indexes stay — declare index changes separately", c.name, table))
-				}
-				if c.autoIncr || c.primary || c.generatedExpr != "" {
-					errs = append(errs, fmt.Errorf("changed column %q of table %q cannot restate auto-increment, primary key or generated expressions; use Exec for those", c.name, table))
-				}
-			}
-		}
-	}
-	checkTablePK := func(def *tableDef) {
-		nullable := make(map[string]bool, len(def.columns))
-		for _, c := range def.columns {
-			if _, dup := nullable[c.name]; dup {
-				errs = append(errs, fmt.Errorf("table %q declares column %q twice", def.name, c.name))
-			}
-			nullable[c.name] = c.nullable
-		}
-		for _, p := range def.primary {
-			if nullable[p] {
-				errs = append(errs, fmt.Errorf("primary key column %q of table %q cannot be nullable", p, def.name))
-			}
-		}
-	}
-	for _, op := range s.ops {
-		switch o := op.(type) {
-		case *createTable:
-			errs = append(errs, o.def.errs...)
-			check(o.def.name, o.def.columns, false)
-			checkTablePK(o.def)
-		case *recreateTable:
-			errs = append(errs, o.def.errs...)
-			check(o.def.name, o.def.columns, false)
-			checkTablePK(o.def)
-		case *alterTable:
-			errs = append(errs, o.errs...)
-			for _, ch := range o.changes {
-				if add, ok := ch.(*addColumn); ok {
-					check(o.table, []*columnDef{add.col}, true)
-				}
-			}
-		}
-	}
-	if len(errs) == 0 {
-		return nil
-	}
-	return fmt.Errorf("migration %q: %w", name, declarationErrors(errs))
-}
-
 // checksum covers compiled SQL and arguments, but not opaque Run functions.
 // The encoding is injective (type-tagged, length-prefixed) and pointer-free.
 func (m *Migration) checksum(d Dialect) (string, error) {
@@ -181,59 +89,6 @@ func (m *Migration) checksum(d Dialect) (string, error) {
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// checksumArg writes one argument's canonical form; unsupported types fail
-// rather than hash lossily.
-func checksumArg(h io.Writer, s statement, a any) error {
-	if a == nil {
-		_, _ = io.WriteString(h, "n")
-		return nil
-	}
-	rv := reflect.ValueOf(a)
-	for rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface {
-		if rv.IsNil() {
-			_, _ = io.WriteString(h, "n")
-			return nil
-		}
-		rv = rv.Elem()
-	}
-	if t, ok := rv.Interface().(time.Time); ok {
-		// RFC 3339 in UTC rather than UnixNano: no epoch-range surprises.
-		stamp := t.UTC().Format(time.RFC3339Nano)
-		_, _ = fmt.Fprintf(h, "t%d:%s", len(stamp), stamp)
-		return nil
-	}
-	switch rv.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		_, _ = fmt.Fprintf(h, "i%d", rv.Int())
-		return nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		_, _ = fmt.Fprintf(h, "u%d", rv.Uint())
-		return nil
-	case reflect.Float32, reflect.Float64:
-		// Bit-exact: %v would fold 1.0 into 1 and drift on formatting rules.
-		_, _ = fmt.Fprintf(h, "f%x", math.Float64bits(rv.Float()))
-		return nil
-	case reflect.Bool:
-		_, _ = fmt.Fprintf(h, "b%t", rv.Bool())
-		return nil
-	case reflect.String:
-		str := rv.String()
-		_, _ = fmt.Fprintf(h, "s%d:%s", len(str), str)
-		return nil
-	case reflect.Slice:
-		if rv.Type().Elem().Kind() == reflect.Uint8 {
-			b := rv.Bytes()
-			_, _ = fmt.Fprintf(h, "x%d:", len(b))
-			_, _ = h.Write(b)
-			return nil
-		}
-	}
-	return fmt.Errorf(
-		"migrate: cannot checksum a %T argument (statement %q); pass a plain scalar, []byte, or time.Time",
-		a, describeStatement(s),
-	)
 }
 
 func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
@@ -274,66 +129,18 @@ func (m *Migration) compile(d Dialect, up bool) ([]statement, error) {
 	return stmts, nil
 }
 
-func firstConcurrentIndex(ops []operation) string {
-	fromDef := func(def *tableDef) string {
-		for _, idx := range def.indexes {
-			if idx.concurrently {
-				return idx.resolvedName(def.name)
-			}
-		}
-		return ""
-	}
-	for _, op := range ops {
-		switch o := op.(type) {
-		case *createTable:
-			if n := fromDef(o.def); n != "" {
-				return n
-			}
-		case *recreateTable:
-			if n := fromDef(o.def); n != "" {
-				return n
-			}
-		case *alterTable:
-			for _, ch := range o.changes {
-				switch c := ch.(type) {
-				case *addIndex:
-					if c.idx.concurrently {
-						return c.idx.resolvedName(o.table)
-					}
-				case *dropIndex:
-					if c.concurrently {
-						return c.name
-					}
-				}
-			}
-		}
-	}
-	return ""
+// MigrationOption configures a single migration at registration time.
+type MigrationOption func(*Migration)
+
+// WithDown defines rollback for otherwise irreversible operations.
+func WithDown(down func(*Schema)) MigrationOption {
+	return func(m *Migration) { m.down = down }
 }
 
-// operationCommitsImplicitly classifies MySQL's transaction-ending DDL.
-func operationCommitsImplicitly(op operation) bool {
-	switch o := op.(type) {
-	case *rawSQL:
-		return !plainDMLSQL(o.sql)
-	case *goFunc:
-		return false
-	default:
-		return true
-	}
-}
-
-// plainDMLSQL stays conservative so failure reports never understate commits.
-func plainDMLSQL(sql string) bool {
-	fields := strings.Fields(sql)
-	if len(fields) == 0 {
-		return false
-	}
-	switch strings.ToUpper(fields[0]) {
-	case "INSERT", "UPDATE", "DELETE", "REPLACE", "SELECT", "WITH", "VALUES", "DO":
-		return true
-	}
-	return false
+// WithoutTransaction permits statements such as PostgreSQL CREATE INDEX
+// CONCURRENTLY. Earlier statements may remain applied after a failure.
+func WithoutTransaction() MigrationOption {
+	return func(m *Migration) { m.useTx = false }
 }
 
 // Collection is a named migration set. Package-level Add uses a default one.
@@ -347,8 +154,9 @@ func NewCollection() *Collection {
 	return &Collection{byName: map[string]*Migration{}}
 }
 
-// Add registers a lexically ordered migration. It panics on invalid names,
-// duplicates, or a nil declaration.
+// Add registers a lexically ordered migration. It panics on an empty,
+// whitespace-padded, or over-191-character name, on a duplicate name, or on a
+// nil declaration.
 func (c *Collection) Add(name string, up func(*Schema), opts ...MigrationOption) {
 	c.add(name, up, false, opts)
 }
@@ -425,4 +233,201 @@ func Add(name string, up func(*Schema), opts ...MigrationOption) {
 // AddRepeatable registers a repeatable migration in the default collection.
 func AddRepeatable(name string, run func(*Schema), opts ...MigrationOption) {
 	defaultCollection.AddRepeatable(name, run, opts...)
+}
+
+func validateSchema(name string, s *Schema) error {
+	errs := append([]error(nil), s.errs...)
+	check := func(table string, cols []*columnDef, altering bool) {
+		for _, c := range cols {
+			if c.autoIncr {
+				switch {
+				case !c.integerKind() && c.kind != kindRaw:
+					errs = append(errs, fmt.Errorf("auto-increment column %q of table %q must be an integer", c.name, table))
+				case c.hasDefault:
+					errs = append(errs, fmt.Errorf("auto-increment column %q of table %q cannot have a default value", c.name, table))
+				case c.nullable:
+					errs = append(errs, fmt.Errorf("auto-increment column %q of table %q cannot be nullable", c.name, table))
+				}
+			}
+			suppliesValue := c.hasDefault || c.useCurrent || c.autoIncr
+			if c.generatedExpr != "" && suppliesValue {
+				errs = append(errs, fmt.Errorf("generated column %q of table %q cannot combine with defaults or auto-increment", c.name, table))
+			}
+			if c.copyFrom != "" && c.skipCopy {
+				errs = append(errs, fmt.Errorf("column %q of table %q declares both CopyFrom and SkipCopy", c.name, table))
+			}
+			if c.primary && c.nullable {
+				// SQLite otherwise accepts the contradictory NULL primary key.
+				errs = append(errs, fmt.Errorf("primary key column %q of table %q cannot be nullable", c.name, table))
+			}
+			if c.change && !altering {
+				errs = append(errs, fmt.Errorf("column %q of table %q declares Change, which is only valid inside Schema.Table", c.name, table))
+			}
+			if c.changeUsing != "" && !c.change {
+				errs = append(errs, fmt.Errorf("column %q of table %q declares Using without Change", c.name, table))
+			}
+			if c.change {
+				if c.unique || c.indexed {
+					errs = append(errs, fmt.Errorf("changed column %q of table %q cannot restate Unique/Index modifiers; the existing indexes stay — declare index changes separately", c.name, table))
+				}
+				restatesIdentity := c.autoIncr || c.primary || c.generatedExpr != ""
+				if restatesIdentity {
+					errs = append(errs, fmt.Errorf("changed column %q of table %q cannot restate auto-increment, primary key or generated expressions; use Exec for those", c.name, table))
+				}
+			}
+		}
+	}
+	checkTablePK := func(def *tableDef) {
+		nullable := make(map[string]bool, len(def.columns))
+		for _, c := range def.columns {
+			if _, dup := nullable[c.name]; dup {
+				errs = append(errs, fmt.Errorf("table %q declares column %q twice", def.name, c.name))
+			}
+			nullable[c.name] = c.nullable
+		}
+		for _, p := range def.primary {
+			if nullable[p] {
+				errs = append(errs, fmt.Errorf("primary key column %q of table %q cannot be nullable", p, def.name))
+			}
+		}
+	}
+	for _, op := range s.ops {
+		switch o := op.(type) {
+		case *createTable:
+			errs = append(errs, o.def.errs...)
+			check(o.def.name, o.def.columns, false)
+			checkTablePK(o.def)
+		case *recreateTable:
+			errs = append(errs, o.def.errs...)
+			check(o.def.name, o.def.columns, false)
+			checkTablePK(o.def)
+		case *alterTable:
+			errs = append(errs, o.errs...)
+			for _, ch := range o.changes {
+				if add, ok := ch.(*addColumn); ok {
+					check(o.table, []*columnDef{add.col}, true)
+				}
+			}
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("migration %q: %w", name, declarationErrors(errs))
+}
+
+// checksumArg writes one argument's canonical form; unsupported types fail
+// rather than hash lossily.
+func checksumArg(h io.Writer, s statement, a any) error {
+	if a == nil {
+		_, _ = io.WriteString(h, "n")
+		return nil
+	}
+	rv := reflect.ValueOf(a)
+	for rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			_, _ = io.WriteString(h, "n")
+			return nil
+		}
+		rv = rv.Elem()
+	}
+	if t, ok := rv.Interface().(time.Time); ok {
+		// RFC 3339 in UTC rather than UnixNano: no epoch-range surprises.
+		stamp := t.UTC().Format(time.RFC3339Nano)
+		_, _ = fmt.Fprintf(h, "t%d:%s", len(stamp), stamp)
+		return nil
+	}
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		_, _ = fmt.Fprintf(h, "i%d", rv.Int())
+		return nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		_, _ = fmt.Fprintf(h, "u%d", rv.Uint())
+		return nil
+	case reflect.Float32, reflect.Float64:
+		// Bit-exact: %v would fold 1.0 into 1 and drift on formatting rules.
+		_, _ = fmt.Fprintf(h, "f%x", math.Float64bits(rv.Float()))
+		return nil
+	case reflect.Bool:
+		_, _ = fmt.Fprintf(h, "b%t", rv.Bool())
+		return nil
+	case reflect.String:
+		str := rv.String()
+		_, _ = fmt.Fprintf(h, "s%d:%s", len(str), str)
+		return nil
+	case reflect.Slice:
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			b := rv.Bytes()
+			_, _ = fmt.Fprintf(h, "x%d:", len(b))
+			_, _ = h.Write(b)
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"migrate: cannot checksum a %T argument (statement %q); pass a plain scalar, []byte, or time.Time",
+		a, describeStatement(s),
+	)
+}
+
+// firstConcurrentIndex names the first index declared Concurrently, or "".
+func firstConcurrentIndex(ops []operation) string {
+	fromDef := func(def *tableDef) string {
+		for _, idx := range def.indexes {
+			if idx.concurrently {
+				return idx.resolvedName(def.name)
+			}
+		}
+		return ""
+	}
+	for _, op := range ops {
+		switch o := op.(type) {
+		case *createTable:
+			if n := fromDef(o.def); n != "" {
+				return n
+			}
+		case *recreateTable:
+			if n := fromDef(o.def); n != "" {
+				return n
+			}
+		case *alterTable:
+			for _, ch := range o.changes {
+				switch c := ch.(type) {
+				case *addIndex:
+					if c.idx.concurrently {
+						return c.idx.resolvedName(o.table)
+					}
+				case *dropIndex:
+					if c.concurrently {
+						return c.name
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// operationCommitsImplicitly classifies MySQL's transaction-ending DDL.
+func operationCommitsImplicitly(op operation) bool {
+	switch o := op.(type) {
+	case *rawSQL:
+		return !plainDMLSQL(o.sql)
+	case *goFunc:
+		return false
+	default:
+		return true
+	}
+}
+
+// plainDMLSQL stays conservative so failure reports never understate commits.
+func plainDMLSQL(sql string) bool {
+	fields := strings.Fields(sql)
+	if len(fields) == 0 {
+		return false
+	}
+	switch strings.ToUpper(fields[0]) {
+	case "INSERT", "UPDATE", "DELETE", "REPLACE", "SELECT", "WITH", "VALUES", "DO":
+		return true
+	}
+	return false
 }

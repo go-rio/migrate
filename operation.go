@@ -13,10 +13,6 @@ type operation interface {
 	inverse() (operation, error)
 }
 
-func irreversible(format string, a ...any) error {
-	return fmt.Errorf("%w: %s", ErrIrreversible, fmt.Sprintf(format, a...))
-}
-
 // colKind is the portable column type understood by each dialect.
 type colKind int
 
@@ -123,6 +119,13 @@ func (i *indexDef) suffix() string {
 	}
 }
 
+func (i *indexDef) resolvedName(table string) string {
+	if i.name != "" {
+		return i.name
+	}
+	return indexName(table, i.columns, i.suffix())
+}
+
 type checkDef struct {
 	name string
 	expr string
@@ -142,6 +145,13 @@ type foreignDef struct {
 	refColumns []string
 	onDelete   string
 	onUpdate   string
+}
+
+func (f *foreignDef) resolvedName(table string) string {
+	if f.name != "" {
+		return f.name
+	}
+	return foreignName(table, f.columns)
 }
 
 type tableDef struct {
@@ -166,34 +176,6 @@ func (d *tableDef) constraintTable() string {
 		return d.constraintBase
 	}
 	return d.name
-}
-
-// Conventional names use the unqualified table name and can be reconstructed.
-
-func indexName(table string, columns []string, suffix string) string {
-	return baseName(table) + "_" + strings.Join(columns, "_") + "_" + suffix
-}
-
-func foreignName(table string, columns []string) string {
-	return baseName(table) + "_" + strings.Join(columns, "_") + "_foreign"
-}
-
-func primaryName(table string) string {
-	return baseName(table) + "_pkey"
-}
-
-func (i *indexDef) resolvedName(table string) string {
-	if i.name != "" {
-		return i.name
-	}
-	return indexName(table, i.columns, i.suffix())
-}
-
-func (f *foreignDef) resolvedName(table string) string {
-	if f.name != "" {
-		return f.name
-	}
-	return foreignName(table, f.columns)
 }
 
 type createTable struct {
@@ -396,4 +378,22 @@ type setTableComment struct {
 
 func (c *setTableComment) inverseChange(table string) ([]change, error) {
 	return nil, irreversible("changing the comment of table %q discards the previous comment", table)
+}
+
+func irreversible(format string, a ...any) error {
+	return fmt.Errorf("%w: %s", ErrIrreversible, fmt.Sprintf(format, a...))
+}
+
+// Conventional names use the unqualified table name and can be reconstructed.
+
+func indexName(table string, columns []string, suffix string) string {
+	return baseName(table) + "_" + strings.Join(columns, "_") + "_" + suffix
+}
+
+func foreignName(table string, columns []string) string {
+	return baseName(table) + "_" + strings.Join(columns, "_") + "_foreign"
+}
+
+func primaryName(table string) string {
+	return baseName(table) + "_pkey"
 }

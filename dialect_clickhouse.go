@@ -251,6 +251,22 @@ func (clickHouseDialect) typeSQL(c *columnDef) (string, error) {
 	}
 }
 
+func (clickHouseDialect) lock(context.Context, *sql.Conn, string, time.Duration) (lockToken, error) {
+	return "", fmt.Errorf("%w: clickhouse has no built-in session migration lock; serialize migration execution externally, then opt in with WithoutLock", ErrLockUnsupported)
+}
+
+func (clickHouseDialect) unlock(context.Context, *sql.Conn, lockToken) error { return nil }
+
+func (clickHouseDialect) quoteIdent(name string) string { return clickHouseQ.table(name) }
+
+func (clickHouseDialect) listTablesSQL() string {
+	return "SELECT name FROM system.tables WHERE database = currentDatabase() AND is_temporary = 0"
+}
+
+func (clickHouseDialect) freshDropSQL(table string) string {
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s SYNC", clickHouseQ.table(table))
+}
+
 func clickHouseIntegerType(signed string, unsigned bool) string {
 	if unsigned {
 		return "U" + signed
@@ -296,20 +312,4 @@ func clickHouseForeignError(table string) error {
 
 func clickHouseEscape(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
-}
-
-func (clickHouseDialect) lock(context.Context, *sql.Conn, string, time.Duration) (lockToken, error) {
-	return "", fmt.Errorf("%w: clickhouse has no built-in session migration lock; serialize migration execution externally, then opt in with WithoutLock", ErrLockUnsupported)
-}
-
-func (clickHouseDialect) unlock(context.Context, *sql.Conn, lockToken) error { return nil }
-
-func (clickHouseDialect) quoteIdent(name string) string { return clickHouseQ.table(name) }
-
-func (clickHouseDialect) listTablesSQL() string {
-	return "SELECT name FROM system.tables WHERE database = currentDatabase() AND is_temporary = 0"
-}
-
-func (clickHouseDialect) freshDropSQL(table string) string {
-	return fmt.Sprintf("DROP TABLE IF EXISTS %s SYNC", clickHouseQ.table(table))
 }

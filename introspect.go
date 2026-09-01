@@ -186,23 +186,6 @@ func (c *Collection) SQL(dialect Dialect) ([]Planned, error) {
 	return out, nil
 }
 
-func renderStatements(stmts []statement) []string {
-	out := make([]string, len(stmts))
-	for i, s := range stmts {
-		switch {
-		case s.fn != nil && s.desc != "":
-			out[i] = "-- " + s.desc + " (runs at migration time)"
-		case s.fn != nil:
-			out[i] = "-- Go function: not renderable, runs at migration time"
-		case len(s.args) > 0:
-			out[i] = fmt.Sprintf("%s\n-- args: %v", s.sql, s.args)
-		default:
-			out[i] = s.sql
-		}
-	}
-	return out
-}
-
 // Baseline records existing schema without executing migrations. An optional
 // name limits versioned migrations; repeatables are always included.
 // Rollback skips baselined rows, while Reset includes them.
@@ -321,16 +304,6 @@ func (m *Migrator) Fresh(ctx context.Context) error {
 	return nil
 }
 
-func freshProgressNote(dropped, remaining []string) string {
-	if len(dropped) == 0 {
-		return fmt.Sprintf("no table was dropped; remaining tables: %q", remaining)
-	}
-	if len(remaining) == 0 {
-		return fmt.Sprintf("tables %q were already dropped and were not restored", dropped)
-	}
-	return fmt.Sprintf("tables %q were already dropped and were not restored; remaining tables: %q", dropped, remaining)
-}
-
 func (m *Migrator) listTables(ctx context.Context, db DB) ([]string, error) {
 	rows, err := db.QueryContext(ctx, m.d.listTablesSQL())
 	if err != nil {
@@ -384,4 +357,31 @@ func (m *Migrator) Repair(ctx context.Context) error {
 		m.cfg.logger.Info("migrate: repaired checksums", "migrations", count)
 		return nil
 	})
+}
+
+func renderStatements(stmts []statement) []string {
+	out := make([]string, len(stmts))
+	for i, s := range stmts {
+		switch {
+		case s.fn != nil && s.desc != "":
+			out[i] = "-- " + s.desc + " (runs at migration time)"
+		case s.fn != nil:
+			out[i] = "-- Go function: not renderable, runs at migration time"
+		case len(s.args) > 0:
+			out[i] = fmt.Sprintf("%s\n-- args: %v", s.sql, s.args)
+		default:
+			out[i] = s.sql
+		}
+	}
+	return out
+}
+
+func freshProgressNote(dropped, remaining []string) string {
+	if len(dropped) == 0 {
+		return fmt.Sprintf("no table was dropped; remaining tables: %q", remaining)
+	}
+	if len(remaining) == 0 {
+		return fmt.Sprintf("tables %q were already dropped and were not restored", dropped)
+	}
+	return fmt.Sprintf("tables %q were already dropped and were not restored; remaining tables: %q", dropped, remaining)
 }

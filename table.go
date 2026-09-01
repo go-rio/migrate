@@ -59,13 +59,6 @@ func (t *Table) alterOnly(method string) bool {
 	return true
 }
 
-func optional[T any](v []T, def T) T {
-	if len(v) > 0 {
-		return v[0]
-	}
-	return def
-}
-
 // ID declares a 64-bit auto-incrementing primary key named "id" by default.
 func (t *Table) ID(name ...string) *Column {
 	return t.BigInteger(optional(name, "id")).Unsigned().AutoIncrement()
@@ -474,17 +467,26 @@ func (t *Table) DropPrimary() {
 	}
 }
 
+func optional[T any](v []T, def T) T {
+	if len(v) > 0 {
+		return v[0]
+	}
+	return def
+}
+
 // guessParentTable handles conventional *_id names and regular plurals.
 func guessParentTable(column string) string {
 	base := strings.TrimSuffix(column, "_id")
 	if base == column || base == "" {
 		return ""
 	}
+	consonantY := len(base) >= 2 && strings.HasSuffix(base, "y") && !strings.ContainsRune("aeiou", rune(base[len(base)-2]))
+	sibilant := strings.HasSuffix(base, "s") || strings.HasSuffix(base, "x") || strings.HasSuffix(base, "z") ||
+		strings.HasSuffix(base, "ch") || strings.HasSuffix(base, "sh")
 	switch {
-	case len(base) >= 2 && strings.HasSuffix(base, "y") && !strings.ContainsRune("aeiou", rune(base[len(base)-2])):
+	case consonantY:
 		return base[:len(base)-1] + "ies"
-	case strings.HasSuffix(base, "s") || strings.HasSuffix(base, "x") || strings.HasSuffix(base, "z") ||
-		strings.HasSuffix(base, "ch") || strings.HasSuffix(base, "sh"):
+	case sibilant:
 		return base + "es"
 	default:
 		return base + "s"
