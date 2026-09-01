@@ -182,3 +182,41 @@ func TestRecreateRequiresTransaction(t *testing.T) {
 		t.Fatal("nothing destructive may execute")
 	}
 }
+
+func TestRecreateCopyFromAndGenerated(t *testing.T) {
+	got := compileSchema(t, SQLite, func(s *Schema) {
+		s.Recreate("events", func(t *Table) {
+			t.ID()
+			t.Integer("age_years").CopyFrom("CAST(age AS INTEGER)")
+			t.String("label").StoredAs("'ev-' || id")
+			t.Check("events_age_positive", "age_years >= 0")
+		})
+	})
+	want := []string{
+		`CREATE TABLE "events__migrate_new" (
+	"id" INTEGER PRIMARY KEY AUTOINCREMENT,
+	"age_years" INTEGER NOT NULL,
+	"label" VARCHAR(255) NOT NULL GENERATED ALWAYS AS ('ev-' || id) STORED,
+	CONSTRAINT "events_age_positive" CHECK (age_years >= 0)
+)`,
+		// Generated columns are omitted from the copy.
+		`INSERT INTO "events__migrate_new" ("id", "age_years") SELECT "id", CAST(age AS INTEGER) FROM "events"`,
+		`-- capture the triggers of "events"`,
+		`DROP TABLE "events"`,
+		`ALTER TABLE "events__migrate_new" RENAME TO "events"`,
+		`-- recreate the captured triggers of "events"`,
+	}
+	assertSQL(t, got, want)
+}
+
+func TestCopyFromSkipCopyConflict(t *testing.T) {
+	m := migrationOf(t, func(s *Schema) {
+		s.Recreate("t", func(tb *Table) {
+			tb.ID()
+			tb.String("x").CopyFrom("y").SkipCopy()
+		})
+	})
+	if _, err := m.upOps(); err == nil {
+		t.Fatal("CopyFrom plus SkipCopy must be a declaration error")
+	}
+}

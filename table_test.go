@@ -170,3 +170,49 @@ func TestPackageLevelAddUsesDefaultCollection(t *testing.T) {
 		t.Error("the default collection migration should have run")
 	}
 }
+
+func TestGeneratedColumns(t *testing.T) {
+	declare := func(s *Schema) {
+		s.Create("people", func(t *Table) {
+			t.ID()
+			t.String("first")
+			t.String("last")
+			t.String("full").StoredAs("first || ' ' || last")
+			t.JSON("meta").Nullable()
+			t.String("kind", 32).VirtualAs("json_extract(meta, '$.kind')").Nullable()
+		})
+	}
+	pg := compileSchema(t, Postgres, declare)[0]
+	for _, frag := range []string{
+		`"full" VARCHAR(255) GENERATED ALWAYS AS (first || ' ' || last) STORED NOT NULL`,
+		`"kind" VARCHAR(32) GENERATED ALWAYS AS (json_extract(meta, '$.kind')) VIRTUAL`,
+	} {
+		if !strings.Contains(pg, frag) {
+			t.Errorf("postgres missing %q in:\n%s", frag, pg)
+		}
+	}
+	my := compileSchema(t, MySQL, declare)[0]
+	if !strings.Contains(my, "`full` VARCHAR(255) GENERATED ALWAYS AS (first || ' ' || last) STORED NOT NULL") {
+		t.Errorf("mysql stored generated column, got:\n%s", my)
+	}
+	lite := compileSchema(t, SQLite, declare)[0]
+	if !strings.Contains(lite, `"full" VARCHAR(255) NOT NULL GENERATED ALWAYS AS (first || ' ' || last) STORED`) {
+		t.Errorf("sqlite stored generated column, got:\n%s", lite)
+	}
+}
+
+func TestGeneratedColumnValidation(t *testing.T) {
+	cases := map[string]func(*Table){
+		"with default":        func(t *Table) { t.String("x").StoredAs("a").Default("y") },
+		"with use current":    func(t *Table) { t.Timestamp("x").StoredAs("a").UseCurrent() },
+		"with auto increment": func(t *Table) { t.Integer("x").AutoIncrement().StoredAs("a") },
+	}
+	for name, decl := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := migrationOf(t, func(s *Schema) { s.Create("t", func(tb *Table) { decl(tb) }) })
+			if _, err := m.upOps(); err == nil {
+				t.Fatal("expected a declaration error")
+			}
+		})
+	}
+}
