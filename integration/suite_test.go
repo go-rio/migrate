@@ -296,3 +296,26 @@ func runBaseline(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Fatalf("Up after Baseline: %v", err)
 	}
 }
+
+// migrateDescIndex creates posts with a mixed-direction key on
+// (created_at DESC, id); the caller verifies what the database recorded.
+func migrateDescIndex(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
+	t.Helper()
+	dropAll(t, db)
+	t.Cleanup(func() { dropAll(t, db) })
+	c := migrate.NewCollection()
+	c.Add("001_create_posts", func(s *migrate.Schema) {
+		s.Create("posts", func(t *migrate.Table) {
+			t.ID()
+			t.TimestampTz("created_at")
+			t.Index("created_at", "id").Desc("created_at")
+		})
+	})
+	m, err := migrate.New(db, dialect, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := m.Up(context.Background()); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+}

@@ -235,6 +235,14 @@ func foreignClause(q quoter, table string, fk *foreignDef) string {
 // validateIndex rejects features a dialect cannot preserve faithfully.
 func validateIndex(dialect, table string, idx *indexDef) error {
 	name := idx.resolvedName(table)
+	if len(idx.desc) > 0 && len(idx.exprs) > 0 {
+		return fmt.Errorf("migrate: Desc applies to column indexes; write the direction into the expression of index %q of table %q", name, table)
+	}
+	for _, c := range idx.desc {
+		if !slices.Contains(idx.columns, c) {
+			return fmt.Errorf("migrate: index %q of table %q marks %q descending but does not index it", name, table, c)
+		}
+	}
 	switch dialect {
 	case "postgres":
 		if idx.fulltext {
@@ -283,11 +291,19 @@ func validateIndex(dialect, table string, idx *indexDef) error {
 	return nil
 }
 
-// indexItems renders the key list. Only MySQL wraps each functional key part
-// in parentheses; elsewhere expressions pass verbatim (see IndexExpr).
+// indexItems renders the key list: quoted columns with DESC where marked, or
+// expressions verbatim. Only MySQL wraps each functional key part in
+// parentheses (see IndexExpr).
 func indexItems(dialect string, q quoter, idx *indexDef) string {
 	if len(idx.exprs) == 0 {
-		return q.idents(idx.columns)
+		items := make([]string, len(idx.columns))
+		for i, c := range idx.columns {
+			items[i] = q.ident(c)
+			if slices.Contains(idx.desc, c) {
+				items[i] += " DESC"
+			}
+		}
+		return strings.Join(items, ", ")
 	}
 	if dialect != "mysql" {
 		return strings.Join(idx.exprs, ", ")

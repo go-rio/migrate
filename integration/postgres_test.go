@@ -390,3 +390,15 @@ func TestPostgresUniqueConstraint(t *testing.T) {
 		t.Fatalf("post-recreate conflict update lost: qty = %d", got)
 	}
 }
+
+func TestPostgresDescIndex(t *testing.T) {
+	db := openPostgres(t)
+	migrateDescIndex(t, db, migrate.Postgres)
+	var def string
+	if err := db.QueryRow(`SELECT pg_get_indexdef('posts_created_at_id_index'::regclass)`).Scan(&def); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(def, "(created_at DESC, id)") {
+		t.Fatalf("index definition = %q", def)
+	}
+}

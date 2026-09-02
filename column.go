@@ -151,6 +151,15 @@ func (i *Index) Name(name string) *Index {
 	return i
 }
 
+// Desc indexes the named columns descending, so the key matches a scan that
+// mixes directions (ORDER BY created_at DESC, id). Every dialect honors it;
+// MySQL before 8.0 parsed and ignored it. Expression indexes carry the
+// direction inside the expression instead.
+func (i *Index) Desc(columns ...string) *Index {
+	i.def.desc = append(i.def.desc, columns...)
+	return i
+}
+
 // Where makes this a partial index with a verbatim predicate.
 // MySQL rejects partial indexes.
 func (i *Index) Where(predicate string) *Index {

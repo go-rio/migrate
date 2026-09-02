@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-02
+
+### Added
+
+- `Index.Desc(columns...)` indexes the named columns descending on PostgreSQL,
+  MySQL (8.0+), and SQLite: the key shape a mixed-direction `ORDER BY`, such
+  as rio's keyset paging, needs. A column outside the index or an expression
+  index fails at compile time.
+
 ## [0.12.1] - 2026-09-02
 
 ### Added
@@ -274,7 +283,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offline dry-run plans, checksums, session advisory locks, batch rollbacks,
   `Baseline`, `Repair`, and no third-party dependencies.
 
-[Unreleased]: https://github.com/go-rio/migrate/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/go-rio/migrate/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/go-rio/migrate/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/go-rio/migrate/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/go-rio/migrate/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/go-rio/migrate/compare/v0.10.0...v0.11.0

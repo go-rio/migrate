@@ -174,6 +174,7 @@ created name; `DropIndexByName`/`DropForeignByName` take exact names.
 Unsupported index modifier combinations fail at compile time with advice:
 
 ```go
+t.Index("created_at", "id").Desc("created_at") // mixed-direction key, as keyset paging orders (MySQL 8.0+)
 t.Unique("name").Where("deleted_at IS NULL")  // partial index (Postgres, SQLite)
 t.Index("payload").Using("gin")               // method (Postgres); btree/hash on MySQL
 t.Unique("email").Include("name")             // covering index (Postgres)

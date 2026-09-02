@@ -600,3 +600,27 @@ func TestSQLitePartialUniqueIndex(t *testing.T) {
 		t.Fatalf("a soft-deleted row should release the name: %v", err)
 	}
 }
+
+func TestSQLiteDescIndex(t *testing.T) {
+	db := openSQLite(t)
+	migrateDescIndex(t, db, migrate.SQLite)
+	rows, err := db.Query(`PRAGMA index_xinfo('posts_created_at_id_index')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]int{}
+	for rows.Next() {
+		var seq, cid, desc, key int
+		var name, coll sql.NullString
+		if err := rows.Scan(&seq, &cid, &name, &desc, &coll, &key); err != nil {
+			t.Fatal(err)
+		}
+		if key == 1 {
+			got[name.String] = desc
+		}
+	}
+	if got["created_at"] != 1 || got["id"] != 0 {
+		t.Fatalf("index directions = %v, want created_at descending and id ascending", got)
+	}
+}

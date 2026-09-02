@@ -264,3 +264,35 @@ func TestIndexOptionsMoveChecksum(t *testing.T) {
 		t.Fatal("adding Where must change the checksum")
 	}
 }
+
+func TestIndexDesc(t *testing.T) {
+	keyset := func(s *Schema) {
+		s.Table("posts", func(t *Table) { t.Index("created_at", "id").Desc("created_at") })
+	}
+	assertSQL(t, compileSchema(t, Postgres, keyset), []string{
+		`CREATE INDEX "posts_created_at_id_index" ON "posts" ("created_at" DESC, "id")`,
+	})
+	assertSQL(t, compileSchema(t, SQLite, keyset), []string{
+		`CREATE INDEX "posts_created_at_id_index" ON "posts" ("created_at" DESC, "id")`,
+	})
+	assertSQL(t, compileSchema(t, MySQL, keyset), []string{
+		"CREATE INDEX `posts_created_at_id_index` ON `posts` (`created_at` DESC, `id`)",
+	})
+
+	unique := func(s *Schema) {
+		s.Table("posts", func(t *Table) { t.Unique("slug", "version").Desc("version") })
+	}
+	assertSQL(t, compileSchema(t, Postgres, unique), []string{
+		`CREATE UNIQUE INDEX "posts_slug_version_unique" ON "posts" ("slug", "version" DESC)`,
+	})
+
+	unknown := func(s *Schema) {
+		s.Table("posts", func(t *Table) { t.Index("created_at").Desc("updated_at") })
+	}
+	assertErrContains(t, compileErr(Postgres, unknown), "does not index it")
+
+	expr := func(s *Schema) {
+		s.Table("posts", func(t *Table) { t.IndexExpr("posts_lower_index", "lower(slug)").Desc("slug") })
+	}
+	assertErrContains(t, compileErr(SQLite, expr), "into the expression")
+}

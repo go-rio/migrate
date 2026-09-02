@@ -93,6 +93,7 @@ func (c *columnDef) inlinePrimary() bool {
 type indexDef struct {
 	name     string // empty means the conventional name
 	columns  []string
+	desc     []string // columns indexed descending
 	exprs    []string // expression index: SQL rendered verbatim instead of columns
 	unique   bool
 	fulltext bool // MySQL FULLTEXT
