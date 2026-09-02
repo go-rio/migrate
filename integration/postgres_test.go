@@ -402,3 +402,35 @@ func TestPostgresDescIndex(t *testing.T) {
 		t.Fatalf("index definition = %q", def)
 	}
 }
+
+func TestPostgresDeferredForeign(t *testing.T) {
+	db := openPostgres(t)
+	migrateDeferredForeign(t, db, migrate.Postgres)
+	insertChildFirst(t, db)
+}
+
+func TestPostgresCollation(t *testing.T) {
+	db := openPostgres(t)
+	dropAll(t, db)
+	t.Cleanup(func() { dropAll(t, db) })
+	c := migrate.NewCollection()
+	c.Add("001_create_users", func(s *migrate.Schema) {
+		s.Create("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email").Collation("C")
+		})
+	})
+	m, err := migrate.New(db, migrate.Postgres, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := m.Up(context.Background()); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	var collation string
+	err = db.QueryRow(`SELECT c.collname FROM pg_attribute a JOIN pg_collation c ON c.oid = a.attcollation
+		WHERE a.attrelid = 'users'::regclass AND a.attname = 'email'`).Scan(&collation)
+	if err != nil || collation != "C" {
+		t.Fatalf("email collation = %q, %v", collation, err)
+	}
+}

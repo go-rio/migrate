@@ -319,3 +319,52 @@ func migrateDescIndex(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
 		t.Fatalf("Up: %v", err)
 	}
 }
+
+// migrateDeferredForeign creates users and posts whose foreign key is
+// checked at commit.
+func migrateDeferredForeign(t *testing.T, db *sql.DB, dialect migrate.Dialect) {
+	t.Helper()
+	dropAll(t, db)
+	t.Cleanup(func() { dropAll(t, db) })
+	c := migrate.NewCollection()
+	c.Add("001_create_users_posts", func(s *migrate.Schema) {
+		s.Create("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("name")
+		})
+		s.Create("posts", func(t *migrate.Table) {
+			t.ID()
+			t.ForeignID("user_id").Constrained().Deferrable()
+		})
+	})
+	m, err := migrate.New(db, dialect, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := m.Up(context.Background()); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+}
+
+// insertChildFirst writes a post before its user inside one transaction,
+// which only a deferred key allows, then confirms an orphan still fails.
+func insertChildFirst(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO posts (id, user_id) VALUES (1, 1)"); err != nil {
+		t.Fatalf("child before parent: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO users (id, name) VALUES (1, 'ann')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO posts (id, user_id) VALUES (2, 9)"); err == nil {
+		t.Fatal("an orphan must still fail when its statement commits")
+	}
+}

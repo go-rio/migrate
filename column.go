@@ -86,6 +86,14 @@ func (c *Column) Comment(comment string) *Column {
 	return c
 }
 
+// Collation sets the column's collation by the dialect's own name: a
+// PostgreSQL collation ("C", "und-x-icu"), a MySQL collation (utf8mb4_bin),
+// or a SQLite one (NOCASE). ClickHouse rejects it.
+func (c *Column) Collation(name string) *Column {
+	c.def.collation = name
+	return c
+}
+
 // After positions an altered MySQL or ClickHouse column after another column.
 func (c *Column) After(column string) *Column {
 	c.def.after = column
@@ -214,6 +222,14 @@ func (f *ForeignKey) Name(name string) *ForeignKey {
 	return f
 }
 
+// Deferrable checks the key at commit (DEFERRABLE INITIALLY DEFERRED) on
+// PostgreSQL and SQLite, so rows can reference each other within one
+// transaction. MySQL rejects it.
+func (f *ForeignKey) Deferrable() *ForeignKey {
+	f.def.deferrable = true
+	return f
+}
+
 // CascadeOnDelete deletes child rows when the parent row is deleted.
 func (f *ForeignKey) CascadeOnDelete() *ForeignKey { f.def.onDelete = "CASCADE"; return f }
 
@@ -292,6 +308,15 @@ func (fc *ForeignColumn) NullOnDelete() *ForeignColumn {
 	fc.constrainedOnly("NullOnDelete")
 	if fc.fk != nil {
 		fc.fk.NullOnDelete()
+	}
+	return fc
+}
+
+// Deferrable checks the key at commit; see ForeignKey.Deferrable.
+func (fc *ForeignColumn) Deferrable() *ForeignColumn {
+	fc.constrainedOnly("Deferrable")
+	if fc.fk != nil {
+		fc.fk.Deferrable()
 	}
 	return fc
 }

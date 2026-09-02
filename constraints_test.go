@@ -176,3 +176,26 @@ func TestCheckReversesAndSQLiteRefusesAlter(t *testing.T) {
 		t.Fatal("anonymous checks must be rejected")
 	}
 }
+
+func TestDeferrableForeign(t *testing.T) {
+	alter := func(s *Schema) {
+		s.Table("posts", func(t *Table) {
+			t.Foreign("user_id").References("users").CascadeOnDelete().Deferrable()
+		})
+	}
+	assertSQL(t, compileSchema(t, Postgres, alter), []string{
+		`ALTER TABLE "posts" ADD CONSTRAINT "posts_user_id_foreign" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED`,
+	})
+	assertErrContains(t, compileErr(MySQL, alter), "immediately")
+
+	create := func(s *Schema) {
+		s.Create("posts", func(t *Table) {
+			t.ID()
+			t.ForeignID("user_id").Constrained().Deferrable()
+		})
+	}
+	if got := compileSchema(t, SQLite, create)[0]; !strings.Contains(got, `REFERENCES "users" ("id") DEFERRABLE INITIALLY DEFERRED`) {
+		t.Fatalf("sqlite: %s", got)
+	}
+	assertErrContains(t, compileErr(MySQL, create), "immediately")
+}

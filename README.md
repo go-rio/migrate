@@ -139,7 +139,8 @@ s.Create("articles", func(t *migrate.Table) {
 - Relational engines: `.Unique()`, `.Index()`, `.Primary()`,
   `.AutoIncrement()`; ClickHouse rejects these with an alternative.
 - Also: `.Unsigned()` (MySQL, ClickHouse), `.StoredAs(expr)` /
-  `.VirtualAs(expr)` generated columns, `.Comment(...)`, `.After(...)` /
+  `.VirtualAs(expr)` generated columns, `.Comment(...)`, `.Collation(name)`
+  (the dialect's own collation name; ClickHouse rejects it), `.After(...)` /
   `.First()` on MySQL and ClickHouse alterations, `.UseCurrentOnUpdate()`
   (MySQL only).
 - Table names may be schema-qualified: `s.Create("analytics.events", ...)`.
@@ -167,7 +168,9 @@ t.Foreign("code").References("regions", "code")  // existing column, explicit
 ```
 
 Referential actions chain: `CascadeOnDelete`, `RestrictOnDelete`,
-`NullOnDelete`, and the `OnUpdate` variants. Names follow
+`NullOnDelete`, and the `OnUpdate` variants; `Deferrable()` checks the key
+at commit on PostgreSQL and SQLite, so rows can reference each other within
+one transaction (MySQL rejects it). Names follow
 `{table}_{columns}_{index|unique|foreign}`, so dropping by columns
 (`t.DropIndex("a", "b")`, `t.DropForeign("user_id")`) reconstructs the
 created name; `DropIndexByName`/`DropForeignByName` take exact names.
@@ -197,6 +200,10 @@ PostgreSQL and SQLite: parenthesize PostgreSQL arithmetic yourself
 such as an operator class (`"lower(email) text_pattern_ops"`). MySQL alone
 requires every functional key part parenthesized, so each expression gains
 one pair there.
+
+MySQL indexes a `Text`, `Binary`, or `JSON` column only by prefix or through
+a generated column, so a plain index over one fails at compile time with
+both alternatives named; `FullText` is the exception.
 
 #### Named unique constraints
 

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-02
+
+### Added
+
+- `Column.Collation(name)` renders `COLLATE` with the dialect's own collation
+  name on PostgreSQL, MySQL, and SQLite, in `Create` and `Change` alike;
+  ClickHouse rejects it.
+- `ForeignKey.Deferrable()` renders `DEFERRABLE INITIALLY DEFERRED` on
+  PostgreSQL and SQLite, so rows can reference each other within one
+  transaction; MySQL rejects it at compile time.
+- MySQL rejects a plain index over a `Text`, `Binary`, or `JSON` column at
+  compile time, naming the prefix and generated-column alternatives;
+  `FullText` is unaffected.
+
+### Changed
+
+- `Binary` maps to `LONGBLOB` on MySQL, matching `Text`'s `LONGTEXT` under
+  the builder's unbounded contract; `BLOB` stopped at 64 KB. Migrations that
+  declared `Binary` on MySQL now render different SQL, so their recorded
+  checksums no longer match: run `Repair` after upgrading.
+
 ## [0.13.0] - 2026-09-02
 
 ### Added
@@ -283,7 +304,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offline dry-run plans, checksums, session advisory locks, batch rollbacks,
   `Baseline`, `Repair`, and no third-party dependencies.
 
-[Unreleased]: https://github.com/go-rio/migrate/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/go-rio/migrate/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/go-rio/migrate/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/go-rio/migrate/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/go-rio/migrate/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/go-rio/migrate/compare/v0.11.0...v0.12.0

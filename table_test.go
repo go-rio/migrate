@@ -54,7 +54,7 @@ func TestColumnKindMapping(t *testing.T) {
 		`"tstz"`:       {"TIMESTAMPTZ", "DATETIME(6)", "DATETIME"},
 		`"doc"`:        {"JSONB", "JSON", "TEXT"},
 		`"uid"`:        {"UUID", "CHAR(36)", "CHAR(36)"},
-		`"bin"`:        {"BYTEA", "BLOB", "BLOB"},
+		`"bin"`:        {"BYTEA", "LONGBLOB", "BLOB"},
 		`"mood"`:       {"VARCHAR(255)", "ENUM('up', 'down')", "TEXT"},
 		`"raw"`:        {"MACADDR", "MACADDR", "MACADDR"},
 		`"deleted_at"`: {"TIMESTAMPTZ", "DATETIME(6)", "DATETIME"},
@@ -215,4 +215,43 @@ func TestGeneratedColumnValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCollation(t *testing.T) {
+	declare := func(name string) func(*Schema) {
+		return func(s *Schema) {
+			s.Create("users", func(t *Table) {
+				t.ID()
+				t.String("email").Collation(name).Unique()
+			})
+		}
+	}
+	if got := compileSchema(t, Postgres, declare("C"))[0]; !strings.Contains(got, `"email" VARCHAR(255) COLLATE "C" NOT NULL`) {
+		t.Fatalf("postgres: %s", got)
+	}
+	if got := compileSchema(t, MySQL, declare("utf8mb4_bin"))[0]; !strings.Contains(got, "`email` VARCHAR(255) COLLATE utf8mb4_bin NOT NULL") {
+		t.Fatalf("mysql: %s", got)
+	}
+	if got := compileSchema(t, SQLite, declare("NOCASE"))[0]; !strings.Contains(got, `"email" VARCHAR(255) COLLATE NOCASE NOT NULL`) {
+		t.Fatalf("sqlite: %s", got)
+	}
+	clickhouse := func(s *Schema) {
+		s.Create("users", func(t *Table) {
+			t.String("email").Collation("en")
+			t.ClickHouseEngine("MergeTree() ORDER BY tuple()")
+		})
+	}
+	assertErrContains(t, compileErr(ClickHouse, clickhouse), "collation")
+
+	change := func(name string) func(*Schema) {
+		return func(s *Schema) {
+			s.Table("users", func(t *Table) { t.String("email").Collation(name).Change() })
+		}
+	}
+	if got := compileSchema(t, Postgres, change("C"))[0]; got != `ALTER TABLE "users" ALTER COLUMN "email" TYPE VARCHAR(255) COLLATE "C"` {
+		t.Fatalf("postgres change: %s", got)
+	}
+	assertSQL(t, compileSchema(t, MySQL, change("utf8mb4_bin")), []string{
+		"ALTER TABLE `users` MODIFY COLUMN `email` VARCHAR(255) COLLATE utf8mb4_bin NOT NULL",
+	})
 }

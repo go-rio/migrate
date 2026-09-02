@@ -624,3 +624,33 @@ func TestSQLiteDescIndex(t *testing.T) {
 		t.Fatalf("index directions = %v, want created_at descending and id ascending", got)
 	}
 }
+
+func TestSQLiteDeferredForeign(t *testing.T) {
+	db := openSQLite(t)
+	migrateDeferredForeign(t, db, migrate.SQLite)
+	insertChildFirst(t, db)
+}
+
+func TestSQLiteCollation(t *testing.T) {
+	db := openSQLite(t)
+	dropAll(t, db)
+	t.Cleanup(func() { dropAll(t, db) })
+	c := migrate.NewCollection()
+	c.Add("001_create_users", func(s *migrate.Schema) {
+		s.Create("users", func(t *migrate.Table) {
+			t.ID()
+			t.String("email").Collation("NOCASE").Unique()
+		})
+	})
+	m, err := migrate.New(db, migrate.SQLite, migrate.WithCollection(c))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := m.Up(context.Background()); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	mustExec(t, db, `INSERT INTO users (email) VALUES ('Ann@example.com')`)
+	if _, err := db.Exec(`INSERT INTO users (email) VALUES ('ann@example.com')`); err == nil {
+		t.Fatal("a NOCASE unique index should reject a case-variant duplicate")
+	}
+}

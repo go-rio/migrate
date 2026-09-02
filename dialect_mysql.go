@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -95,6 +96,9 @@ func (d mysqlDialect) compileCreate(def *tableDef) ([]statement, error) {
 		clauses = append(clauses, uniqueConstraintClause(myQ, uc))
 	}
 	for _, fk := range def.fks {
+		if err := mysqlForeignCheck(def.constraintTable(), fk); err != nil {
+			return nil, err
+		}
 		clauses = append(clauses, foreignClause(myQ, def.constraintTable(), fk))
 	}
 
@@ -105,6 +109,9 @@ func (d mysqlDialect) compileCreate(def *tableDef) ([]statement, error) {
 	stmts := []statement{sqlStatement("CREATE TABLE %s (\n\t%s\n)%s",
 		myQ.table(def.name), strings.Join(clauses, ",\n\t"), suffix)}
 	for _, idx := range append(inlineIndexes(def.columns), def.indexes...) {
+		if err := mysqlIndexableCheck(def, idx); err != nil {
+			return nil, err
+		}
 		sql, err := createIndexSQL("mysql", myQ, def.name, idx, false)
 		if err != nil {
 			return nil, err
@@ -155,6 +162,9 @@ func (d mysqlDialect) compileAlter(op *alterTable) ([]statement, error) {
 		case *dropIndex:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP INDEX %s", table, myQ.ident(c.name)))
 		case *addForeign:
+			if err := mysqlForeignCheck(op.table, c.fk); err != nil {
+				return nil, err
+			}
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s ADD %s", table, foreignClause(myQ, op.table, c.fk)))
 		case *dropForeign:
 			stmts = append(stmts, sqlStatement("ALTER TABLE %s DROP FOREIGN KEY %s", table, myQ.ident(c.name)))
@@ -191,6 +201,9 @@ func (d mysqlDialect) columnSQL(c *columnDef, altering bool) (string, error) {
 	}
 	var b strings.Builder
 	b.WriteString(myQ.ident(c.name) + " " + typ)
+	if c.collation != "" {
+		b.WriteString(" COLLATE " + c.collation)
+	}
 	b.WriteString(generatedClause(c))
 	if !c.nullable {
 		b.WriteString(" NOT NULL")
@@ -268,7 +281,8 @@ func (mysqlDialect) typeSQL(c *columnDef) (string, error) {
 	case kindUUID:
 		return "CHAR(36)", nil
 	case kindBinary:
-		return "BLOB", nil
+		// LONGBLOB preserves the builder's unbounded Binary contract.
+		return "LONGBLOB", nil
 	case kindEnum:
 		vals := make([]string, len(c.enumVals))
 		for i, v := range c.enumVals {
@@ -330,4 +344,30 @@ func mysqlLockName(database, table string) lockToken {
 
 func mysqlEscape(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", "''")
+}
+
+// mysqlForeignCheck rejects what InnoDB cannot express.
+func mysqlForeignCheck(table string, fk *foreignDef) error {
+	if fk.deferrable {
+		return fmt.Errorf("migrate: mysql checks foreign keys immediately (constraint %q of table %q declares Deferrable); write parents before children, or drop the constraint around the load", fk.resolvedName(table), table)
+	}
+	return nil
+}
+
+// mysqlIndexableCheck rejects a plain index over a TEXT, BLOB, or JSON
+// column: MySQL indexes those only by prefix or through a generated column.
+func mysqlIndexableCheck(def *tableDef, idx *indexDef) error {
+	if idx.fulltext || idx.spatial {
+		return nil
+	}
+	for _, c := range def.columns {
+		if !slices.Contains(idx.columns, c.name) {
+			continue
+		}
+		switch c.kind {
+		case kindText, kindBinary, kindJSON:
+			return fmt.Errorf("migrate: mysql cannot index the whole of column %q (index %q of table %q); index a prefix with Exec (INDEX name (col(191))) or a generated column declared with StoredAs", c.name, idx.resolvedName(def.name), def.name)
+		}
+	}
+	return nil
 }

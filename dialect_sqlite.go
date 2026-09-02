@@ -196,6 +196,9 @@ func (d sqliteDialect) columnSQL(table string, c *columnDef) (string, error) {
 	}
 	var b strings.Builder
 	b.WriteString(liteQ.ident(c.name) + " " + typ)
+	if c.collation != "" {
+		b.WriteString(" COLLATE " + c.collation)
+	}
 	if c.inlinePrimary() {
 		if c.kind == kindRaw && !strings.EqualFold(strings.TrimSpace(c.rawType), "INTEGER") {
 			return "", fmt.Errorf("migrate: sqlite allows AUTOINCREMENT only on INTEGER columns; column %q declares %q", c.name, c.rawType)

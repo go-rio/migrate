@@ -60,11 +60,12 @@ type columnDef struct {
 	useCurrent         bool
 	useCurrentOnUpdate bool
 
-	unique  bool
-	indexed bool
-	comment string
-	after   string
-	first   bool
+	unique    bool
+	indexed   bool
+	comment   string
+	collation string // COLLATE name in the dialect's own vocabulary
+	after     string
+	first     bool
 
 	generatedExpr    string // GENERATED ALWAYS AS (expr)
 	generatedVirtual bool   // VIRTUAL instead of STORED
@@ -146,6 +147,7 @@ type foreignDef struct {
 	refColumns []string
 	onDelete   string
 	onUpdate   string
+	deferrable bool // DEFERRABLE INITIALLY DEFERRED (Postgres, SQLite)
 }
 
 func (f *foreignDef) resolvedName(table string) string {

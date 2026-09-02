@@ -296,3 +296,34 @@ func TestIndexDesc(t *testing.T) {
 	}
 	assertErrContains(t, compileErr(SQLite, expr), "into the expression")
 }
+
+func TestMySQLWholeColumnIndex(t *testing.T) {
+	body := func(s *Schema) {
+		s.Create("posts", func(t *Table) {
+			t.ID()
+			t.Text("body").Index()
+		})
+	}
+	assertErrContains(t, compileErr(MySQL, body), "index a prefix")
+	compileSchema(t, Postgres, body)
+	compileSchema(t, SQLite, body)
+
+	wide := func(s *Schema) {
+		s.Create("posts", func(t *Table) {
+			t.ID()
+			t.JSON("doc")
+			t.Binary("payload")
+			t.Unique("doc", "payload")
+		})
+	}
+	assertErrContains(t, compileErr(MySQL, wide), "index a prefix")
+
+	fulltext := func(s *Schema) {
+		s.Create("posts", func(t *Table) {
+			t.ID()
+			t.Text("body")
+			t.FullText("body")
+		})
+	}
+	compileSchema(t, MySQL, fulltext)
+}

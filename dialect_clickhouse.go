@@ -162,6 +162,8 @@ func (d clickHouseDialect) columnSQL(table string, c *columnDef, altering bool) 
 		return "", fmt.Errorf("migrate: clickhouse cannot preserve relational uniqueness for column %q of table %q; choose an appropriate MergeTree engine in ClickHouseEngine or enforce uniqueness in the application", c.name, table)
 	case c.indexed:
 		return "", clickHouseIndexError(table)
+	case c.collation != "":
+		return "", fmt.Errorf("migrate: clickhouse has no column collation (column %q of table %q); collate in queries with ORDER BY ... COLLATE", c.name, table)
 	case c.useCurrentOnUpdate:
 		return "", fmt.Errorf("migrate: clickhouse does not support UseCurrentOnUpdate on column %q of table %q; update the value explicitly in writes or use a MATERIALIZED/ALIAS expression when appropriate", c.name, table)
 	case c.changeUsing != "":

@@ -229,6 +229,9 @@ func foreignClause(q quoter, table string, fk *foreignDef) string {
 	if fk.onUpdate != "" {
 		b.WriteString(" ON UPDATE " + fk.onUpdate)
 	}
+	if fk.deferrable {
+		b.WriteString(" DEFERRABLE INITIALLY DEFERRED")
+	}
 	return b.String()
 }
 
