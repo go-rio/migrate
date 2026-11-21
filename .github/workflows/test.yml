@@ -16,7 +16,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           cache: true
           go-version: ${{ matrix.go }}
@@ -71,7 +71,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           cache: true
           go-version: 'stable'
@@ -88,7 +88,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           cache: true
           go-version: 'stable'
@@ -102,7 +102,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           cache: true
           go-version: 'stable'
