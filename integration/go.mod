@@ -7,7 +7,7 @@ require (
 	github.com/go-rio/migrate v0.14.0
 	github.com/go-sql-driver/mysql v1.10.2
 	github.com/jackc/pgx/v5 v5.13.0
-	modernc.org/sqlite v1.62.0
+	modernc.org/sqlite v1.63.0
 )
 
 require (
